@@ -573,8 +573,8 @@ public final class Ui {
     public static TextView label(Context context, CharSequence text, float sizeSp, @ColorInt int color) {
         TextView view = new TextView(context);
         view.setText(text);
-        view.setTextSize(sizeSp);
-        view.setTextColor(color);
+        ViewPolicy.setTextSizeSp(view, sizeSp);
+        ViewPolicy.setTextColor(view, color);
         return view;
     }
 
@@ -597,7 +597,7 @@ public final class Ui {
     /** Apply the shared completion or warning mark used by setup checks. */
     public static void applyStatusMark(TextView mark, Context context, boolean done) {
         mark.setText(done ? "✓" : "!");
-        mark.setTextColor(done ? onAccent(context) : 0xFFFFFFFF);
+        ViewPolicy.setTextColor(mark, done ? onAccent(context) : 0xFFFFFFFF);
         mark.setBackground(circle(done ? accent(context) : color(context, app.msime.android.R.attr.msWarn)));
         ViewPolicy.hideFromAccessibility(mark);
     }
@@ -780,7 +780,7 @@ public final class Ui {
 
     private static void bindClick(View view, Runnable action) {
         ViewPolicy.setInteractive(view, true);
-        if (action != null) view.setOnClickListener(ignored -> action.run());
+        ViewPolicy.bindOptionalClick(view, action);
     }
 
     /** Create a vertically arranged rounded surface for page cards. */

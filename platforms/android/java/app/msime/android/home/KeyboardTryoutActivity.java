@@ -80,12 +80,12 @@ public final class KeyboardTryoutActivity extends AppCompatActivity {
         ViewCompat.setOnApplyWindowInsetsListener(root, (view, windowInsets) -> {
             Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
-            view.setPadding(bars.left, bars.top, bars.right,
+            ViewPolicy.setPadding(view, bars.left, bars.top, bars.right,
                 Ui.bottomContentInset(bars.bottom, 0, ime.bottom, 0));
             return windowInsets;
         });
 
-        findViewById(R.id.tryout_back).setOnClickListener(ignored -> finish());
+        ViewPolicy.bindClick(findViewById(R.id.tryout_back), this::finish);
 
         EditText field = findViewById(R.id.tryout_field);
         MaterialButton dismiss = findViewById(R.id.tryout_dismiss);
@@ -115,12 +115,12 @@ public final class KeyboardTryoutActivity extends AppCompatActivity {
         // The system picker belongs here rather than on the home page: it is only useful once the
         // user is in front of an editor and finds another keyboard came up.
         MaterialButton switchIme = findViewById(R.id.tryout_switch);
-        switchIme.setOnClickListener(ignored ->
+        ViewPolicy.bindClick(switchIme, () ->
             getSystemService(InputMethodManager.class).showInputMethodPicker());
 
         // 收起键盘 only means something while the keyboard is up, as on Apple.
         ViewPolicy.hide(dismiss);
-        dismiss.setOnClickListener(ignored -> {
+        ViewPolicy.bindClick(dismiss, () -> {
             field.clearFocus();
             getSystemService(InputMethodManager.class).hideSoftInputFromWindow(field.getWindowToken(), 0);
         });
@@ -139,11 +139,11 @@ public final class KeyboardTryoutActivity extends AppCompatActivity {
             }
         });
 
-        sendAi.setOnClickListener(ignored -> {
+        ViewPolicy.bindClick(sendAi, () -> {
             if (sending) cancelChat(sendAi);
             else sendChat(field, sendAi);
         });
-        findViewById(R.id.tryout_clear).setOnClickListener(ignored -> clear(field, sendAi));
+        ViewPolicy.bindClick(findViewById(R.id.tryout_clear), () -> clear(field, sendAi));
 
         greet();
         // 进页面就在后台加载模型目录，不再要用户先点「加载 AI」。
@@ -368,7 +368,7 @@ public final class KeyboardTryoutActivity extends AppCompatActivity {
         bubble.setTextIsSelectable(true);
         setBubbleText(bubble, text, !mine);
         if (!mine) bubble.setMovementMethod(android.text.method.LinkMovementMethod.getInstance());
-        bubble.setLineSpacing(Ui.dp(this, 3), 1f);
+        ViewPolicy.setLineSpacing(bubble, Ui.dp(this, 3), 1f);
         bubble.setBackground(Ui.rounded(mine ? Ui.accent(this) : Ui.card(this), Ui.dp(this, 18)));
         Ui.setSymmetricPaddingDp(bubble, this, 14, 10);
         bubble.setMaxWidth(Math.round(Ui.screenWidthPixels(this) * 0.8f));

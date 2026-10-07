@@ -130,6 +130,11 @@ public final class ViewPolicy {
         view.setOnClickListener(ignored -> action.run());
     }
 
+    /** Bind an optional action, clearing the listener when no action is available. */
+    public static void bindOptionalClick(View view, Runnable action) {
+        view.setOnClickListener(action == null ? null : ignored -> action.run());
+    }
+
     /** Set whether a view accepts input without changing its visibility or focus policy. */
     public static void setEnabled(View view, boolean enabled) {
         view.setEnabled(enabled);
@@ -171,6 +176,11 @@ public final class ViewPolicy {
     /** Center a view's content along the horizontal axis. */
     public static void setCenteredHorizontally(LinearLayout view) {
         view.setGravity(Gravity.CENTER_HORIZONTAL);
+    }
+
+    /** Set an explicit child gravity on a linear layout. */
+    public static void setGravity(LinearLayout view, int gravity) {
+        view.setGravity(gravity);
     }
 
     /** Center a text view's content along the horizontal axis. */
@@ -288,6 +298,11 @@ public final class ViewPolicy {
     /** Set whether a text view is constrained to one line without changing truncation policy. */
     public static void setSingleLine(TextView view, boolean singleLine) {
         view.setSingleLine(singleLine);
+    }
+
+    /** Set additional line spacing and multiplier on a text view. */
+    public static void setLineSpacing(TextView view, float add, float multiplier) {
+        view.setLineSpacing(add, multiplier);
     }
 
     /** Limit a text view to a maximum number of lines without changing truncation policy. */

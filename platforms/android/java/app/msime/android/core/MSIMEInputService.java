@@ -103,6 +103,7 @@ public final class MSIMEInputService extends InputMethodService {
     ImeFunctionPanel imeFunctionPanel;
     ImePanels imePanels;
     ImeLetterRows imeLetterRows;
+    ImeGlideTyping imeGlideTyping;
     ImeBottomRow imeBottomRow;
     ImeLayoutRows imeLayoutRows;
     ImeStyler imeStyler;
@@ -1090,6 +1091,7 @@ public final class MSIMEInputService extends InputMethodService {
         imeFunctionPanel = new ImeFunctionPanel(this);
         imePanels = new ImePanels(this);
         imeLetterRows = new ImeLetterRows(this);
+        imeGlideTyping = new ImeGlideTyping(this);
         imeBottomRow = new ImeBottomRow(this);
         imeLayoutRows = new ImeLayoutRows(this);
         imeStyler = new ImeStyler(this);
@@ -2605,6 +2607,13 @@ public final class MSIMEInputService extends InputMethodService {
         return ChineseHelpcodePolicy.entersHelpcode(dedicatedEnglish, letterCase.usesUppercase(),
             view.optString("editing_text", ""), InputViewValuePolicy.scheme(view, -1),
             view.optString("local_mode", "none"));
+    }
+
+    /** 一笔滑行抬手（{@link ImeGlideTyping}）：请求见 {@link GlideTypingPolicy#request}。引擎不收（handled=false）时什么也不输入。 */
+    void glide(String request) {
+        if (session == 0) return;
+        try { apply(NativeClient.glide(session, request)); }
+        catch (JSONException | LinkageError error) { fail(); }
     }
 
     boolean command(int code) {
@@ -5218,7 +5227,7 @@ public final class MSIMEInputService extends InputMethodService {
     void configureCandidateTextLayout(Button button, int lines) {
         // Reserve extra rows only when this candidate actually carries a gloss. A globally enabled translation target is not evidence that every candidate has one; keeping the empty case single-line prevents long candidate words from wrapping inside the chip. Likewise, a second requested language may be unavailable for this particular result; only an actual newline in the rendered label (a second gloss, or a Korean 훈음 row under its Hanja) warrants another row.
         // A multi-row label deliberately occupies those rows. Do not turn the whole label into a single-line TextView in that case, or the rows after the first are silently clipped. With no extra row the chip can scroll horizontally as one intact candidate word.
-        button.setSingleLine(lines == 1);
+        ViewPolicy.setSingleLine(button, lines == 1);
         button.setEllipsize(null);
         button.setHorizontallyScrolling(lines == 1);
     }
@@ -5903,7 +5912,9 @@ public final class MSIMEInputService extends InputMethodService {
         ViewPolicy.hide(replyKeyboard);
         keyboard.addView(replyKeyboard, KeyboardGeometry.weightedWidthParams(1));
         // 键距是键的外边距；这两个容器把落在空隙里的按下交给拥有那段空隙的键，画面不变（见 KeyboardKeyArea）。
-        keyRows = new KeyboardKeyArea(this, this::followsKeySpacing);
+        KeyboardKeyArea letterArea = new KeyboardKeyArea(this, this::followsKeySpacing);
+        letterArea.setGlideTracker(imeGlideTyping);
+        keyRows = letterArea;
         keyRows.setOrientation(LinearLayout.VERTICAL);
         imeFrame.wrap(keyRows);
         actionRow = new KeyboardKeyArea(this, this::followsKeySpacing);
