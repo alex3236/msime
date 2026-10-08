@@ -265,6 +265,12 @@ pub fn scan(root: &Path, builtin_sounds: Option<&Path>) -> PluginCatalog {
     if let Some(builtin) = builtin_sounds {
         scan_builtin(builtin, &mut catalog);
     }
+    // Do not enumerate through an untrusted root link: even though each pack
+    // is checked again below, read_dir would otherwise expose names from
+    // outside the host's plugins directory as catalog issues.
+    if crate::storage::reject_symlink(root).is_err() {
+        return catalog;
+    }
     for kind in PluginKind::ALL {
         let directory = kind_directory(root, kind);
         match fs::symlink_metadata(&directory) {
@@ -288,6 +294,12 @@ pub fn scan(root: &Path, builtin_sounds: Option<&Path>) -> PluginCatalog {
 
 /// The bundle's built-in packs. They share one directory, so each folder's kind is the one its id is reserved for: a music id is loaded as music, and anything else as a sound pack.
 fn scan_builtin(directory: &Path, catalog: &mut PluginCatalog) {
+    // Do not enumerate through an untrusted resource link: load_installed
+    // rejects each pack below, but read_dir would still expose outside names
+    // as catalog issues.
+    if crate::storage::reject_symlink(directory).is_err() {
+        return;
+    }
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
@@ -885,11 +897,23 @@ pub fn remove(root: &Path, kind: PluginKind, id: &str) -> Result<(), PluginError
     };
     if !metadata.is_dir() {
         // Never a pack, so there is nothing to follow: a link or a stray file goes as itself.
-        fs::remove_file(&target)?;
+        crate::storage::remove_private_file(&target)?;
         return Ok(());
     }
     // Renamed aside first, so a deletion interrupted halfway never leaves a directory that still looks like the pack. The leading dot keeps it out of `scan`, and the next import sweeps it.
     let aside = directory.join(format!(".old-{id}-{}", uuid::Uuid::new_v4().simple()));
+    #[cfg(unix)]
+    {
+        let directory_handle = crate::storage::open_private_directory(&directory)?;
+        rustix::fs::renameat(
+            &directory_handle,
+            std::ffi::OsStr::new(id),
+            &directory_handle,
+            aside.file_name().expect("generated aside name"),
+        )
+        .map_err(std::io::Error::from)?;
+    }
+    #[cfg(not(unix))]
     fs::rename(&target, &aside)?;
     fs::remove_dir_all(&aside)?;
     Ok(())

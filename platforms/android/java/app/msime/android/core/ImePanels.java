@@ -1,8 +1,10 @@
 package app.msime.android;
 
+import app.msime.android.core.InputViewValuePolicy;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -19,12 +21,18 @@ import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+import java.util.ArrayList;
+import java.util.List;
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 /** 盖在键盘上的各个面板：表情、符号、皮肤、输入方案、剪贴板、回复键盘、AI 润色、本地输入菜单与更多工具的入口；从 MSIMEInputService 原样搬出，状态仍在服务里。 */
 final class ImePanels {
+    private static final String SYMBOL_RECENTS_PREFERENCES = "android-symbol-recents";
+    private static final String SYMBOL_RECENTS_KEY = "items";
     private final MSIMEInputService s;
+    private SharedPreferences symbolPreferences;
     private int replyReadGeneration;
     private int replyMenuReadGeneration;
 
@@ -34,8 +42,8 @@ final class ImePanels {
 
     void showLocalInputMenu() {
         if (s.preedit == null || !s.supportsLocalTools() || s.view == null
-                || !s.view.optString("editing_text", "").isEmpty()
-                || !"none".equals(s.view.optString("local_mode", "none"))) return;
+                || !InputViewValuePolicy.editingText(s.view).isEmpty()
+                || !"none".equals(JsonPolicy.strictStringOrEmpty(s.view.opt("local_mode")))) return;
         PopupMenu popup = new PopupMenu(s, s.preedit);
         for (LocalInputMode mode : s.localInputModes()) {
             MenuItem item = popup.getMenu().add(mode.title());
@@ -197,7 +205,7 @@ final class ImePanels {
         s.closeVoiceResult();
         s.closeAiPolish();
         s.closeReplyKeyboard();
-        s.symbolPanel.resetForPresentation();
+        s.symbolPanel.resetForPresentation(loadSymbolRecents());
         // 面板原先没有底色，网格空着时直接透出底下的字母键；铺上键盘底图。
         s.imeStyler.applySkinBackground(s.symbolPanel);
         ViewPolicy.show(s.symbolPanel);
@@ -378,8 +386,8 @@ final class ImePanels {
         JSONObject preferences = s.preferencesSnapshot == null ? null
             : s.preferencesSnapshot.optJSONObject("preferences");
         boolean hostDark = KeyboardSkin.resolveDark(
-            preferences == null ? "follow" : preferences.optString("screen_keyboard_theme", "follow"),
-            preferences == null ? "system" : preferences.optString("theme", "system"), s.systemDark());
+            InputViewValuePolicy.textOr(preferences, "screen_keyboard_theme", "follow"),
+            InputViewValuePolicy.textOr(preferences, "theme", "system"), s.systemDark());
         JSONArray themes = s.themeCatalog();
         int generation = ++skinRenderGeneration;
         renderSkinPickerLoaded(preferences, hostDark, themes, java.util.List.of(), java.util.List.of());
@@ -415,9 +423,9 @@ final class ImePanels {
         for (int index = 0; index < themes.length(); index++) {
             JSONObject entry = themes.optJSONObject(index);
             if (entry == null) continue;
-            String id = entry.optString("id", "");
+            String id = InputViewValuePolicy.textOr(entry, "id", "");
             if (id.isEmpty()) continue;
-            String themeName = entry.optString("title", id);
+            String themeName = InputViewValuePolicy.textOr(entry, "title", id);
             KeyboardSkin choice = "custom".equals(id) ? s.themeSkin(id, customTheme, hostDark)
                 : KeyboardSkin.resolved(entry, themeName, hostDark, null);
             choices.add(new MSIMEInputService.SkinChoice(id, choice.title(), choice, null));
@@ -448,7 +456,7 @@ final class ImePanels {
         }
         choices.removeIf(choice -> "custom".equals(choice.id()) && choice.design() == null
             && namedKeys.contains(choice.skin().key()));
-        String globalTheme = preferences == null ? "system" : preferences.optString("global_theme", "system");
+        String globalTheme = InputViewValuePolicy.textOr(preferences, "global_theme", "system");
         PagedTileGrid grid = new PagedTileGrid(s);
         grid.setGrid(4, 2);
         // 行高容下按 390:292 的迷你键盘（约 86 dp 宽时 65 dp 高）、描边和下方的名字；行距、列距取设计的 6 / 10。
@@ -560,7 +568,7 @@ final class ImePanels {
     LinearLayout createReplyKeyboard() {
         LinearLayout root = KeyboardGeometry.column(s);
         KeyboardGeometry.setSymmetricPaddingDp(root, s, 6, 5);
-        root.setBackgroundColor(Color.parseColor(s.skin.background()));
+        ViewPolicy.setBackgroundColor(root, Color.parseColor(s.skin.background()));
         root.setContentDescription("高情商回复键盘");
 
         s.replyHeader = KeyboardGeometry.row(s);
@@ -1077,7 +1085,7 @@ final class ImePanels {
     }
 
     private void bindFeedbackAction(View view, Runnable action) {
-        view.setOnClickListener(ignored -> {
+        ViewPolicy.bindClick(view, () -> {
             s.imeKeyFeedback.playFeedback(view);
             action.run();
         });
@@ -1414,18 +1422,6 @@ final class ImePanels {
             KeyboardGeometry.setPaddingDp(note, s, 12, 24, 12, 24);
             panel.addView(note, KeyboardGeometry.matchWidthWrapParams());
         }
-        if (EMPTY_PHRASES.equals(message)) {
-            // 空的时候给一条去处：直接打开应用的常用语页去添加，而不是让人自己退出键盘去找。
-            KeyboardPressButton add = phraseButton(KeyboardKeyRole.RETURN, "添加常用语",
-                "添加常用语", () -> {
-                    s.closeCommonPhrases();
-                    s.openHostPage("PHRASES");
-                });
-            KeyboardGeometry.setHorizontalPaddingDp(add, s, 24);
-            LinearLayout.LayoutParams params = KeyboardGeometry.wrapParams();
-            params.gravity = Gravity.CENTER_HORIZONTAL;
-            panel.addView(add, params);
-        }
         java.util.List<View> lines = new java.util.ArrayList<>(phrases.size());
         for (String phrase : phrases) {
             KeyboardPressButton row = phraseButton(KeyboardKeyRole.PLAIN, phrase,
@@ -1447,8 +1443,21 @@ final class ImePanels {
             panel.addView(hairline, line);
             lines.add(hairline);
         }
+        if (message == null || EMPTY_PHRASES.equals(message)) {
+            // 列表下面总有一个去处：空的时候是「添加常用语」，有内容时是「管理常用语」，都直接打开应用的常用语页去添加、修改和删除（#5673），而不是让人自己退出键盘去找。键盘里没有可输入的文本框，增删改放在应用里。读取中和读取失败时不放。
+            String label = CommonPhrasesPanelPolicy.entryLabel(phrases.size());
+            KeyboardPressButton manage = phraseButton(KeyboardKeyRole.RETURN, label, label, () -> {
+                s.closeCommonPhrases();
+                s.openHostPage("PHRASES");
+            });
+            KeyboardGeometry.setHorizontalPaddingDp(manage, s, 24);
+            LinearLayout.LayoutParams params = KeyboardGeometry.wrapParams();
+            params.gravity = Gravity.CENTER_HORIZONTAL;
+            if (!phrases.isEmpty()) params.topMargin = s.pixels(8);
+            panel.addView(manage, params);
+        }
         s.imeStyler.applySkin();
-        for (View hairline : lines) hairline.setBackgroundColor(Color.parseColor(s.skin.hairline()));
+        for (View hairline : lines) ViewPolicy.setBackgroundColor(hairline, Color.parseColor(s.skin.hairline()));
         if (note != null) ViewPolicy.setTextColor(note, ImeStyler.fade(s.skin.keyForeground(), .6));
     }
 
@@ -1476,6 +1485,8 @@ final class ImePanels {
         s.closeVoiceResult();
         s.closeAiPolish();
         s.closeReplyKeyboard();
+        // 文本编辑面板叠在功能面板上面（后加入外框），不先关掉它，功能面板会被盖住。
+        s.imeTextEditPanel.close();
         s.localInputToolsOpen = false;
         s.imeFunctionPanel.renderMoreTools();
         ViewPolicy.show(s.moreToolsScroll);
@@ -1493,8 +1504,24 @@ final class ImePanels {
                 return button;
             },
             new SymbolPanelView.Listener() {
-                @Override public void insert(String text) {
-                    if (s.connection != null) s.commitText(text, TypingSource.LOCAL);
+                @Override public void insert(String text, boolean wholePair, boolean remember) {
+                    if (s.connection == null) return;
+                    // 轻点的正是前面自动补上、还在光标右边的那个后半个时跨过它，不再写一个；长按照字面上屏。
+                    if (wholePair && s.stepOverPairedSymbol(text)) {
+                        if (remember) recordSymbolRecent(text);
+                        return;
+                    }
+                    if (!s.commitText(text, TypingSource.LOCAL)) return;
+                    // 符号面板不经过 Engine，成对补全由宿主按同一个共享开关决定，后半个放在光标右边。
+                    String closing = wholePair && s.pairedPunctuation
+                        ? PairedPunctuationPolicy.symbolClosing(text) : null;
+                    if (closing != null) s.commitClosingMark(closing, TypingSource.LOCAL);
+                    if (remember) recordSymbolRecent(text);
+                }
+
+                @Override public void loadCatalog(SymbolPanelModel.Category category, int offset,
+                        SymbolPanelView.CatalogPages pages) {
+                    loadSymbolCatalogPage(category, offset, pages);
                 }
 
                 @Override public void delete() {
@@ -1503,9 +1530,97 @@ final class ImePanels {
                 }
 
                 @Override public void close() { s.closeSymbolPanel(); }
+
+                @Override public void restyle(View view) { s.imeStyler.applySkinToView(view); }
             });
+        symbolPreferences = s.getSharedPreferences(SYMBOL_RECENTS_PREFERENCES, Context.MODE_PRIVATE);
         ViewPolicy.hide(s.symbolPanel);
         s.keyboardSurface.addView(s.symbolPanel, KeyboardGeometry.frameMatchParentParams());
+    }
+
+    /** 「常用」的使用记录：只存在本机，格式和表情的最近使用一样是一个 JSON 字符串数组。 */
+    private List<String> loadSymbolRecents() {
+        if (symbolPreferences == null) return List.of();
+        String document = symbolPreferences.getString(SYMBOL_RECENTS_KEY, "[]");
+        if (document == null || document.length() > 16_384) return List.of();
+        try {
+            JSONArray values = new JSONArray(document);
+            int count = Math.min(values.length(), SymbolPanelModel.RECENTS_LIMIT * 2);
+            ArrayList<String> stored = new ArrayList<>(count);
+            for (int index = 0; index < count; index++) {
+                Object value = values.opt(index);
+                if (value instanceof String) stored.add((String) value);
+            }
+            return SymbolPanelModel.normalizeRecents(stored);
+        } catch (JSONException error) {
+            return List.of();
+        }
+    }
+
+    /** 隐私模式和不许个性化学习的输入框不记：「常用」会把在那里输入过什么带到别的输入框里。 */
+    private void recordSymbolRecent(String symbol) {
+        if (symbolPreferences == null || s.learningSuppressed() || !SymbolPanelModel.recordable(symbol)) return;
+        List<String> recents = SymbolPanelModel.recordRecent(loadSymbolRecents(), symbol);
+        symbolPreferences.edit().putString(SYMBOL_RECENTS_KEY, new JSONArray(recents).toString()).apply();
+        if (s.symbolPanel != null) s.symbolPanel.setRecents(recents);
+    }
+
+    /** 在表情目录的工作线程上读一页颜文字或符号目录；与表情面板读的是同一个随包 `msime-others.db`，经同一个 `msime_client_emoji_catalog_request`。 */
+    private void loadSymbolCatalogPage(SymbolPanelModel.Category category, int offset,
+            SymbolPanelView.CatalogPages pages) {
+        String resources = s.emojiResources;
+        String query;
+        try {
+            JSONObject request = new JSONObject().put("category", category.catalog())
+                .put("group", category.kaomoji() ? "All" : "")
+                .put("offset", offset).put("limit", SymbolPanelModel.CATALOG_PAGE_SIZE).put("cursor", true);
+            if (!category.parent().isEmpty()) request.put("parent", category.parent());
+            query = request.toString();
+        } catch (JSONException error) {
+            pages.failed();
+            return;
+        }
+        if (resources.isEmpty()) {
+            pages.failed();
+            return;
+        }
+        s.emojiWorker.execute(() -> {
+            SymbolCatalogPage page = null;
+            try {
+                page = decodeSymbolCatalogPage(NativeClient.emojiCatalog(query, resources), offset, category.kaomoji());
+            } catch (JSONException | RuntimeException | LinkageError ignored) {
+                // 读不出目录时面板只说「暂时不可用」，不把资源路径或目录内容写进任何地方。
+            }
+            SymbolCatalogPage result = page;
+            s.main.post(() -> {
+                if (result == null) pages.failed();
+                else pages.loaded(result.items(), result.nextOffset(), result.complete());
+            });
+        });
+    }
+
+    private record SymbolCatalogPage(List<String> items, int nextOffset, boolean complete) {}
+
+    private static SymbolCatalogPage decodeSymbolCatalogPage(String response, int offset, boolean kaomoji)
+            throws JSONException {
+        JSONObject envelope = new JSONObject(response);
+        if (!Boolean.TRUE.equals(envelope.opt("ok"))) throw new JSONException("Symbol catalog unavailable");
+        JSONObject value = envelope.getJSONObject("value");
+        JSONArray entries = value.getJSONArray("items");
+        if (entries.length() > SymbolPanelModel.CATALOG_PAGE_SIZE) throw new JSONException("Symbol catalog page too large");
+        ArrayList<String> items = new ArrayList<>(entries.length());
+        for (int index = 0; index < entries.length(); index++) {
+            Object text = entries.getJSONObject(index).opt("text");
+            if (!(text instanceof String) || !SymbolPanelModel.validCatalogText((String) text, kaomoji))
+                throw new JSONException("Invalid symbol catalog item");
+            items.add((String) text);
+        }
+        long nextOffset = KeyboardGeometry.strictLong(value.opt("next_offset"), -1);
+        Object complete = value.opt("complete");
+        if (!(complete instanceof Boolean)
+                || !SymbolPanelModel.validCatalogCursor(offset, items.size(), nextOffset, (Boolean) complete))
+            throw new JSONException("Invalid symbol catalog cursor");
+        return new SymbolCatalogPage(items, (int) nextOffset, (Boolean) complete);
     }
 
     void buildEmojiPanel() {
@@ -1514,7 +1629,7 @@ final class ImePanels {
         // 设计：盖在键区上、不盖顶部一行；上面是每行八个的表情网格（可见三行，可滚动），底栏是 ABC | 分类 | ⌫。高度由 PanelSurface 限定为键区高度。
         s.emojiPanel = KeyboardGeometry.column(s);
         KeyboardGeometry.setSymmetricPaddingDp(s.emojiPanel, s, 6, 4);
-        s.emojiPanel.setBackgroundColor(Color.parseColor(s.skin.background()));
+        ViewPolicy.setBackgroundColor(s.emojiPanel, Color.parseColor(s.skin.background()));
         s.emojiPanel.setContentDescription("表情面板");
         ViewPolicy.setFocusable(s.emojiPanel, true);
         s.emojiGrid = KeyboardGeometry.column(s);

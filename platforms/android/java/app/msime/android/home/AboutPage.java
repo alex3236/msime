@@ -23,6 +23,7 @@ import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 import app.msime.android.AppEdition;
 import app.msime.android.BoundsPolicy;
+import app.msime.android.DeviceInfoReport;
 import app.msime.android.ViewPolicy;
 import app.msime.android.HttpBodyPolicy;
 import app.msime.android.TextPolicy;
@@ -33,6 +34,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.LinkOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -42,7 +44,7 @@ import java.util.concurrent.Future;
 import java.util.function.Consumer;
 
 /**
- * 关于：居中的标、应用名与版本、检查更新药丸，更新设置（自动更新、更新通道），官网、隐私政策、开源许可等链接，页脚一行版权与「输入内容默认只在本机处理」。
+ * 关于：居中的标、应用名与版本、检查更新药丸，更新设置（自动更新、更新通道），设备信息（反馈问题时一键复制，{@link DeviceInfo}），官网、隐私政策、开源许可等链接，页脚一行版权与「输入内容默认只在本机处理」。
  *
  * <p>检查更新查 msime.app 的 Android 发行版，找到新版本后由用户点「下载」，下载完核对 SHA-256 与签名证书再交给系统安装器（{@link UpdateApi}）。从 Google Play 安装时这三项（检查更新、自动更新、更新通道）都不显示，Play 的政策不允许应用自己更新；同时「给我们评分」才有确定的去处，所以只在这种情况下显示。用户协议还没有确定的页面，不显示。
  *
@@ -123,6 +125,17 @@ public final class AboutPage extends DetailPage {
                 this::setAutoUpdate);
             channelRow = updates.nav("更新通道", null, UpdateJobService.channel(context).title(), this::chooseChannel);
         }
+
+        GroupCard device = GroupCard.add(column, "设备信息").withDividers(Ui.ROW_PADDING_H);
+        TextView reading = device.note("正在读取…");
+        DeviceInfo.load(this, entries -> {
+            ViewPolicy.hide(reading);
+            for (DeviceInfoReport.Entry entry : entries) {
+                device.value(entry.label(), DeviceInfoReport.valueOrUnknown(entry.value()), null);
+            }
+            device.button("复制设备信息", "反馈问题时贴进去，方便开发者排查", "复制",
+                () -> ClipboardActions.copyText(context, "设备信息", DeviceInfo.text(context, entries), "已复制设备信息"));
+        });
 
         GroupCard links = GroupCard.add(column, null).withDividers(Ui.ROW_PADDING_H);
         links.nav("官网", null, "msime.app", () -> openLink(context, SITE));
@@ -400,7 +413,9 @@ public final class AboutPage extends DetailPage {
             for (File file : files == null ? new File[0] : files) {
                 String upper = file.getName().toUpperCase(java.util.Locale.ROOT);
                 if ((upper.contains("LICENSE") || upper.contains("LICENCE") || upper.contains("NOTICE")
-                        || upper.contains("README")) && file.isFile()) found.add(file.getAbsolutePath());
+                        || upper.contains("README"))
+                        && java.nio.file.Files.isRegularFile(file.toPath(), LinkOption.NOFOLLOW_LINKS))
+                    found.add(file.getAbsolutePath());
             }
         }
         found.sort(String::compareTo);
@@ -440,7 +455,8 @@ public final class AboutPage extends DetailPage {
         network(this, () -> {
             // 绝对路径是已下载资源包里的许可文本，其余是 APK assets 里的。
             try (InputStream in = path.startsWith("/")
-                    ? java.nio.file.Files.newInputStream(new File(path).toPath()) : assets.open(path)) {
+                    ? java.nio.file.Files.newInputStream(new File(path).toPath(), LinkOption.NOFOLLOW_LINKS)
+                    : assets.open(path)) {
                 byte[] bytes = HttpBodyPolicy.readBounded(in, MAX_NOTICE_CHARS * 4);
                 if (bytes == null) return null;
                 String text = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);

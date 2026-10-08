@@ -154,6 +154,35 @@ if ! rg -q 'smartPunctuationArmRaw|smartPunctuationDecideRaw' \
   echo "Android smart punctuation must cross the shared Host API through JNI" >&2
   exit 1
 fi
+# 「自动补全成对标点」曾经只是设置页上的一个开关：这个宿主从不读 paired_punctuation，开着也只上屏半个括号（#5608）。键盘标点键的补全规则与 iOS、HarmonyOS 同一份（PairedPunctuationPolicy.completion），符号面板走 symbolClosing，在面板里轻点自动补上的后半个要跨过它（stepOverPairedSymbol），否则面板里补出（|）再点 ）会多一个；补完书名号要经 JNI 通知 Engine 平衡嵌套。
+if ! rg -q 'optBoolean\("paired_punctuation"' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! rg -q 'PairedPunctuationPolicy\.completion\(' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! rg -q 'PairedPunctuationPolicy\.symbolClosing\(' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+  || ! rg -q 'stepOverPairedSymbol\(' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImePanels.java" \
+  || ! rg -q 'stepOverSymbol\(' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! rg -q 'msime_client_balance_paired_punctuation_after_auto_close' \
+    "$repo_root/platforms/android/native/client_jni.cpp"; then
+  echo "Android must honour the shared paired_punctuation preference on punctuation keys and in the symbol panel" >&2
+  exit 1
+fi
+# 候选带 emoji / 颜文字是 Engine 已有的混输（共享偏好 mixed_input.emoji / kaomoji），Android 设置曾经没有开关（#5667）。`MixedInputPreferences` 四个字段都必填，只写一个字段的对象会让整份偏好被拒绝，所以写之前要补齐。
+expression_page="$repo_root/platforms/android/java/app/msime/android/home/ExpressionPage.java"
+for field in english minimum_prefix emoji kaomoji; do
+  if ! rg -q "mixed\.has\(\"$field\"\)" "$expression_page"; then
+    echo "Android expression page must fill mixed_input.$field before writing the object back" >&2
+    exit 1
+  fi
+done
+if ! rg -q 'mixedInput\(edit\)\.put\("emoji"' "$expression_page" \
+  || ! rg -q 'mixedInput\(edit\)\.put\("kaomoji"' "$expression_page"; then
+  echo "Android expression page must offer the shared emoji and kaomoji candidate switches" >&2
+  exit 1
+fi
 # The fullwidth state belongs to the runtime, not to a private SharedPreferences file: the Engine
 # widens what it commits, and it can only do that if the host has told it the width. The second
 # guard is the reason the first one matters - this host used to keep its own latch, and the shared
@@ -520,6 +549,14 @@ for site in onCreateInputView applyClipboardPreference; do
     exit 1
   fi
 done
+# The preferences in runtime-options.json were written once at install and always carry the factory `clipboard_history: false`. Applying them on every editor start turned a switched-on history back off and wiped it, so the panel kept saying 未开启 to a user who had turned it on. Only a live preferences read may decide the switch, and nothing may be cleared before one has.
+if ! rg -q 'if \(appearance\) applyClipboardPreference\(preferences\);' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || ! rg -q 'if \(clipboardPreferenceRead && !clipboardHistoryEnabled\) clipboardHistory\.clearQuietly\(\);' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java"; then
+  echo "Android clipboard history switch must come from live preferences only" >&2
+  exit 1
+fi
 # Both maintenance chords are Ctrl+Shift+Alt, and the modifier branch in onKeyDown hands every
 # such combination to the application. Routing them through one named policy, ahead of that branch,
 # is what keeps them reachable at all on a keyboard that has no long press.
@@ -548,6 +585,67 @@ if ! rg -q 'VoiceConfiguration\.read' \
   || ! rg -q 'msime_client_mobile_voice_configuration' \
     "$repo_root/platforms/android/native/client_jni.cpp"; then
   echo "Android keyboard voice must read the shared provider resolution" >&2
+  exit 1
+fi
+# 键盘每换一个输入框都会重建引擎会话（#5680）。会话建好时要直接用上建会话前读到的那份实时偏好作为第一份快照，没有会话的那一段工具栏按钮开关要用上次真正读到的；否则冷启动的应用里皮肤、输入方式两个按钮先灰约一秒，剪贴板按钮先缺一格、其余按钮跟着挪位。
+if ! sed -n '/private void startEngineSession(String optionsText, String livePreferences)/,/^    }$/p' "$account_service" \
+    | rg -q 'applyPreferencesSnapshot\(value\(livePreferences\)\)' \
+  || ! rg -q '"handwriting_theme", "touch_toolbar"\}' "$account_service" \
+  || ! rg -q 'appearance \|\| rememberedToolbar == null' "$account_service"; then
+  echo "Android toolbar must not start each editor from the factory-default preference copy" >&2
+  exit 1
+fi
+# 长按「中/英」弹出系统输入法选择框（#5615）。这个键在没有会话的输入框里也必须保持可用：禁用的按钮收不到长按，而密码框正是最需要换到密码管理器键盘的地方。没有会话时把键画淡，点按在反馈和计数之前就忽略。
+if ! rg -q 'bindInputMethodPicker\(languageButton\)' "$account_service" \
+  || ! rg -q 'manager\.showInputMethodPicker\(\)' "$account_service" \
+  || rg -q 'setEnabled\(languageButton, session != 0\)' "$account_service" \
+  || ! rg -q 'setActiveAlpha\(languageButton, canToggle' "$account_service" \
+  || ! sed -n '/languageButton\.setOnClickListener/,/});/p' "$account_service" | rg -q 'if \(session == 0\) return;' \
+  || ! rg -q 's\.bindInputMethodPicker\(language\)' \
+    "$repo_root/platforms/android/java/app/msime/android/core/ImeLayoutRows.java"; then
+  echo "Android 中/英 keys must open the system input method picker on long press" >&2
+  exit 1
+fi
+# 删除键上滑快速删除（#5585）：判定只在 BackspaceSwipePolicy，键的触摸监听按它决定松手是否清空，清空经服务的 deleteAllBeforeCursor 分段删除；连删的间隔按 BackspaceRepeatPolicy 逐级加速，不能写回固定间隔。
+letter_rows="$repo_root/platforms/android/java/app/msime/android/core/ImeLetterRows.java"
+if ! rg -q 'BackspaceSwipePolicy\.clearsOnRelease\(backspaceSwipePhase\)' "$letter_rows" \
+  || ! rg -q 'BackspaceRepeatPolicy\.repeatInterval\(repeats\)' "$letter_rows" \
+  || rg -q 'BackspaceRepeatPolicy\.REPEAT_INTERVAL_MS' "$letter_rows" \
+  || ! rg -q 'BackspaceSwipePolicy\.clearBeforeCursor' "$account_service"; then
+  echo "Android delete keys must accelerate and offer the quick-delete swipe through the shared policies" >&2
+  exit 1
+fi
+# 各布局（九键、注音、笔画、手写等）自建的删除键都要经 bindBackspaceRepeat 绑定，否则那个布局按住不连删、也没有上滑快速删除；手写布局的删除键曾经漏绑。
+layout_rows="$repo_root/platforms/android/java/app/msime/android/core/ImeLayoutRows.java"
+if [[ $(rg -c 's\.backspaceKey\(' "$layout_rows") != $(rg -c 's\.imeLetterRows\.bindBackspaceRepeat\(' "$layout_rows") ]]; then
+  echo "Every Android layout delete key must be bound through ImeLetterRows.bindBackspaceRepeat" >&2
+  exit 1
+fi
+# 文本编辑面板（#5625）是工具栏面板的一员：closeToolbarPanels 要关掉它、anyToolbarPanelOpen 要算上它，否则换输入框时它会留在下一个编辑器的键盘上，收起键也不会变成「返回键盘」。
+if ! sed -n '/void closeToolbarPanels()/,/^    }$/p' "$account_service" | rg -q 'imeTextEditPanel\.close\(\)' \
+  || ! sed -n '/boolean anyToolbarPanelOpen()/,/^    }$/p' "$account_service" | rg -q 'shown\(textEditPanel\)'; then
+  echo "Android text edit panel must close and count like the other toolbar panels" >&2
+  exit 1
+fi
+# SpeechRecognizer 绑定的是 RecognitionService；Android 11 起只声明 RECOGNIZE_SPEECH 的话，识别服务与识别界面分属两个包的设备上会判为没有系统识别服务。原生宿主与 Tauri 壳共用同一个识别窗口，两份清单都要声明。
+for manifest in \
+    "$repo_root/platforms/android/AndroidManifest.xml" \
+    "$repo_root/apps/desktop/src-tauri/gen/android/app/src/main/AndroidManifest.xml"; do
+  if ! rg -q '<action android:name="android\.speech\.RecognitionService" />' "$manifest"; then
+    echo "Android manifests must query android.speech.RecognitionService for SpeechRecognizer: $manifest" >&2
+    exit 1
+  fi
+done
+# 键区里的系统识别服务是 SpeechRecognizer 回调接线，JVM 冒烟只能覆盖 PlatformSpeechPolicy 和 ImeVoiceEntry.choose 这些纯逻辑，这里守住回调里不能被悄悄改回去的几处（#5553）：两条入口都按错误码提示、空结果不冒用错误码，没开始聆听就被拒时转交识别窗口，系统识别服务不被 1.5 s 停顿截断，说完后收回音量光圈。
+voice_entry="$repo_root/platforms/android/java/app/msime/android/core/ImeVoiceEntry.java"
+if ! rg -qF 'fail(PlatformSpeechPolicy.message(error))' "$voice_activity" \
+  || ! rg -qF 'fail(PlatformSpeechPolicy.emptyResult())' "$voice_activity" \
+  || ! rg -qF 'PlatformSpeechPolicy.message(error)' "$voice_entry" \
+  || ! rg -qF 'PlatformSpeechPolicy.emptyResult()' "$voice_entry" \
+  || ! rg -qF 's.launchVoiceActivity();' "$voice_entry" \
+  || ! rg -qF 'if (platform != null) return;' "$voice_entry" \
+  || ! rg -qF 'listening.resetLevel();' "$voice_entry"; then
+  echo "Android platform speech callbacks must keep coded errors, the activity hand-off, the uncut pause and the level reset" >&2
   exit 1
 fi
 # The JNI translation unit is the one place a Java declaration and a shared FFI signature have to agree, and nothing else in this script reads it: a method declared native in Java compiles whether or not the C++ side exists. Compiling it for the real target catches that without the full native build, which needs vcpkg, the Rust Android targets and the pinned speech runtime. A machine without the pinned NDK skips it and says so.
@@ -625,6 +723,11 @@ for source in \
     exit 1
   fi
 done
+# 词库页的大标题行只放标题：右侧那排胶囊会在窄屏上把「词库」挤成「词…」（#5682），导入、导出和刷新放在内容里的管理卡片中。
+if rg -n 'headerActions\(\)' "$repo_root/platforms/android/java/app/msime/android/home/LexiconPage.java"; then
+  echo "Android lexicon page must keep its actions in the manage card, not beside the large title" >&2
+  exit 1
+fi
 #
 # Match the launcher activities by their path *inside the repository*. The absolute pattern this
 # started as, `*/home/*`, also matches every source on a GitHub runner, where the checkout itself
@@ -666,9 +769,11 @@ while IFS= read -r source; do
   class=$(basename "$source" .java)
   smoke_classes+=("${package:+$package.}$class")
 done < <(find "$repo_root/platforms/android/tests" -name "*.java" -print | LC_ALL=C sort)
-# 下限就是当前发现的冒烟数（159）；少于这个数说明上面的筛选或 package 解析坏了，而不是冒烟真的变少了。新增冒烟时把这个数一起调高，有意删掉冒烟时同时调低。
-if [[ ${#smoke_classes[@]} -lt 159 ]]; then
-  echo "Only ${#smoke_classes[@]} Android JVM smokes discovered; expected at least 159" >&2
+# 换一条路独立数一遍冒烟：在 `tests/` 里只按文件名找 `*Smoke.java`，得到仓库内的相对路径，再去掉同样的三处排除。两边对不上，说明上面循环的筛选或路径匹配坏了。这里原来是一个写死的下限，每个新增冒烟的 PR 都要改同一行，并行的 Android PR 因此两两冲突；现在新增或删除冒烟都不用改这里。两边都数出 0 也算失败，那是 `tests/` 的位置错了。
+expected_smokes=$( (cd "$repo_root/platforms/android/tests" && find . -name "*Smoke.java" -print) \
+  | grep -cvxE '\./device/.*|\./core/NativeSmoke\.java|\./settings/KeyboardGeometryStrictIntSmoke\.java' || true)
+if [[ $expected_smokes -eq 0 || ${#smoke_classes[@]} -ne $expected_smokes ]]; then
+  echo "Discovered ${#smoke_classes[@]} Android JVM smokes, but platforms/android/tests holds $expected_smokes; the discovery filter is wrong" >&2
   exit 1
 fi
 javac --release 17 -Xlint:all -Werror -cp "$android_jar" -d "$output_dir" \
@@ -684,6 +789,14 @@ for smoke in "${smoke_classes[@]}"; do
   fi
 done
 echo "Ran ${#smoke_classes[@]} Android JVM smokes"
+# 设备测试包只在 `tests/device/smoke.sh` 里构建，而那要模拟器，CI 从不跑它；它的源文件清单是手写的，应用类挪进新的辅助类后没人补，曾经攒到 21 个编译错误，整个设备套件都构建不出来。这里按同一份清单只做编译，漏了类就在这一步失败。
+device_sources=()
+while IFS= read -r source; do
+  [[ -z $source || $source == \#* ]] || device_sources+=("$repo_root/$source")
+done < "$repo_root/platforms/android/tests/device/editor-sources.txt"
+mkdir -p "$output_dir/device"
+javac --release 17 -Xlint:all -Werror -cp "$android_jar" -d "$output_dir/device" "${device_sources[@]}"
+echo "Compiled ${#device_sources[@]} Android device-suite sources"
 # Resources are compiled but not linked here: they reference Material's theme attributes, and linking
 # those needs the library's own resources, which is Gradle's job. Compiling still catches a malformed
 # drawable, layout or values file, which is what this step was for.
@@ -707,6 +820,21 @@ fi
 if rg -q 'button\.setTextColor\(accent\)' \
     "$repo_root/platforms/android/java/app/msime/android/keyboard/KeyboardLayoutAdjustView.java"; then
   echo "Android layout bar buttons must take actionForeground, not the accent they sit on" >&2
+  exit 1
+fi
+# `deleteSurroundingText` 只删选区以外的字：选中开头的「你好」按删除毫无反应，选中中间的文字会删掉选区前一个字。键盘上的删除键都要经 `deleteCodePointBeforeCursor`，由它先删选区；笔画布局曾经绕过它直接调 InputConnection。
+if ! rg -q 'if \(deleteSelection\(\)\) return;' \
+    "$repo_root/platforms/android/java/app/msime/android/core/MSIMEInputService.java" \
+  || rg -l '\.deleteSurroundingTextInCodePoints\(' "$repo_root/platforms/android/java" \
+    | rg -v '/core/MSIMEInputService\.java$' >/dev/null; then
+  echo "Android delete keys must go through deleteCodePointBeforeCursor, which deletes a selection first" >&2
+  exit 1
+fi
+# 符号面板的分类键和锁定键用 setSelected 表示当前项，但键帽颜色只在上色时读一次 isSelected()（ImeStyler.styleButton）。#5597 就是只改了选中状态、没有重新上色：点「网络」后右侧换了，左侧高亮仍停在「常用」。每一处改选中状态的地方都要紧跟一次 restyle。
+symbol_panel_view="$repo_root/platforms/android/java/app/msime/android/keyboard/SymbolPanelView.java"
+if ! rg -q 'ViewPolicy\.setSelected\(' "$symbol_panel_view" \
+  || ! awk '/ViewPolicy\.setSelected\(/ { pending = 1; next } pending { if ($0 !~ /listener\.restyle\(/) bad = 1; pending = 0 } END { exit (bad || pending) }' "$symbol_panel_view"; then
+  echo "Android symbol panel must restyle every button whose selected state it changes" >&2
   exit 1
 fi
 # The JVM smokes cannot load org.json, so nothing else here can reach the one place where the

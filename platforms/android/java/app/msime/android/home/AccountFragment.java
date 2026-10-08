@@ -51,7 +51,7 @@ public final class AccountFragment extends HomeTabFragment {
 
     @Override public void onViewCreated(@NonNull View view, @Nullable Bundle state) {
         View card = view.findViewById(R.id.account_card);
-        card.setBackground(Ui.rippleOn(requireContext(), Ui.card(requireContext()), Ui.dp(requireContext(), 20)));
+        ViewPolicy.setBackground(card, Ui.rippleOn(requireContext(), Ui.card(requireContext()), Ui.dp(requireContext(), 20)));
         ViewPolicy.bindClick(card, this::openProfile);
         render();
     }
@@ -187,6 +187,8 @@ public final class AccountFragment extends HomeTabFragment {
             () -> SettingsNavigator.open(context, PageId.LEXICON, null));
         row(group, R.drawable.ic_ms_star, "常用语", null, null,
             () -> SettingsNavigator.open(context, PageId.PHRASES, null));
+        row(group, R.drawable.ic_ms_download, "备份与恢复", "导出到本机文件，换手机时恢复", null,
+            () -> SettingsNavigator.open(context, PageId.BACKUP, null));
         row(group, R.drawable.ic_ms_content_paste, "云剪贴板", null,
             online == null || online.clipboard() < 0 ? null : online.clipboard() + " 条",
             () -> SettingsNavigator.open(context, PageId.CLOUD_CLIPBOARD, null));
@@ -241,7 +243,7 @@ public final class AccountFragment extends HomeTabFragment {
             }
         });
         if (real) {
-            sync.setBackground(Ui.ripple(context));
+            ViewPolicy.setBackground(sync, Ui.ripple(context));
             ViewPolicy.setInteractive(sync, true);
             ViewPolicy.bindClick(sync, () -> setSync(!toggle.isChecked()));
         } else {

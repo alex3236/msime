@@ -9,12 +9,15 @@ use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd};
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::fs::File;
+#[cfg(not(unix))]
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The cache of the last feed and the dismissed ids.
 pub const NOTICES_FILE: &str = "notices.json";
+const NOTICES_LOCK_FILE: &str = "notices.lock";
 /// The server's `max-age`; the feed is not requested again sooner, whether the last attempt worked or not.
 pub const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 /// Most notices the server lists.
@@ -162,6 +165,7 @@ impl NoticeStore {
     ) -> Result<Vec<Notice>, NoticeError> {
         let platform =
             crate::telemetry::canonical_platform(platform).ok_or(NoticeError::Invalid)?;
+        let _lock = self.lock()?;
         let feed = format!("{}/{platform}", channel.as_str());
         let mut cache = self.read();
         if cache.feed != feed {
@@ -200,6 +204,7 @@ impl NoticeStore {
         {
             return Err(NoticeError::Invalid);
         }
+        let _lock = self.lock()?;
         let mut cache = self.read();
         if cache.dismissed.iter().any(|dismissed| dismissed == id) {
             return Ok(());
@@ -212,18 +217,23 @@ impl NoticeStore {
         self.write(&cache)
     }
 
+    fn lock(&self) -> Result<File, NoticeError> {
+        if !self.directory.is_absolute()
+            || !crate::storage::create_directory_and_check(&self.directory)?
+        {
+            return Err(NoticeError::Storage);
+        }
+        let lock = crate::file_lock::open_lock_file(self.directory.join(NOTICES_LOCK_FILE))?;
+        crate::file_lock::exclusive(&lock)?;
+        Ok(lock)
+    }
+
     fn read(&self) -> NoticeCache {
         let path = self.directory.join(NOTICES_FILE);
-        if !self.directory.is_absolute() || crate::storage::reject_symlink(&path).is_err() {
+        if !self.directory.is_absolute() {
             return NoticeCache::default();
         }
-        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-            return NoticeCache::default();
-        };
-        if !metadata.file_type().is_file() {
-            return NoticeCache::default();
-        }
-        let mut cache: NoticeCache = crate::storage::open_private_file(&path)
+        let mut cache: NoticeCache = crate::storage::open_private_file_in(&path)
             .ok()
             .and_then(|file| crate::bounded_io::read_bounded(file, MAX_CACHE_BYTES).ok())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -241,12 +251,25 @@ impl NoticeStore {
             return Err(NoticeError::Storage);
         }
         let bytes = serde_json::to_vec(cache).map_err(|_| NoticeError::Storage)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-        temporary.write_all(&bytes)?;
-        temporary
-            .persist(self.directory.join(NOTICES_FILE))
-            .map_err(|_| NoticeError::Storage)?;
-        Ok(())
+        #[cfg(unix)]
+        {
+            let directory = crate::storage::open_private_directory(&self.directory)?;
+            crate::storage::write_private_file_at(
+                &directory,
+                std::ffi::OsStr::new(NOTICES_FILE),
+                &bytes,
+            )?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
+            temporary.write_all(&bytes)?;
+            temporary
+                .persist(self.directory.join(NOTICES_FILE))
+                .map_err(|_| NoticeError::Storage)?;
+            Ok(())
+        }
     }
 }
 

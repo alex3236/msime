@@ -1,7 +1,8 @@
 import inputMethodEngine from '@ohos.inputMethodEngine';
 import fs from '@ohos.file.fs';
+import util from '@ohos.util';
 import client from 'libmsimeclient.so';
-import { utf8Length } from './Utf8';
+import { utf8Length, utf8WriteComplete } from './Utf8';
 import { TextPolicy } from './TextPolicy';
 import { KeyboardLog, describeError } from './KeyboardLog';
 import { DictionaryMaintenancePolicy } from './DictionaryMaintenancePolicy';
@@ -32,7 +33,8 @@ import { KeyboardGeometry } from './KeyboardGeometry';
 import { FullWidthInputPolicy } from './input/FullWidthInputPolicy';
 import { ChineseHelpcodePolicy } from './input/ChineseHelpcodePolicy';
 import { ChineseOutputPolicy } from './input/ChineseOutputPolicy';
-import { KeyboardFeedback, FeedbackSettings, HapticStrength } from './KeyboardFeedback';
+import { KeyboardFeedback, FeedbackSettings, HapticPlan, HapticStrength } from './KeyboardFeedback';
+import { NumberKeypadOrder } from './input/NineKeyLayout';
 import { HardwareKeyRouter, HardwareNavigationPreferences, HardwareSpelling } from './HardwareKeyRouter';
 import vibrator from '@ohos.vibrator';
 import common from '@ohos.app.ability.common';
@@ -186,8 +188,14 @@ interface EngineView extends EngineViewNumericFields {
   page: number;
   page_count: number;
   generation: number;
-  /** Which spellings the digits typed so far could be, offered while the nine-key grid is up. */
+  /** Which spellings the digits typed so far could be, offered while the nine-key grid is up. 依次是完整拼音（小写）、下一个数字键上能起头的字母（大写，选它只限定下一个音节的首字母）、没有锁定任何音节时的数字本身（选它上屏这个数字）。 */
   nine_key_spellings: string[];
+  /** 全拼九键组字时首选候选的拼音读音（`ning'bai`），读音行画它而不是数字；其他情况为空。旧的原生库不带这个字段。 */
+  nine_key_reading?: string;
+  /** 九宫格候选当前只留单字，组字结束时恢复为假。 */
+  nine_key_single_character?: boolean;
+  /** 九宫格候选当前的笔顺前缀（`hspnz`），空表示不按笔画筛选；组字结束时清空。 */
+  nine_key_strokes?: string;
   /**
    * What the Engine is committing its own output as.
    *
@@ -537,6 +545,9 @@ export interface KeyboardState {
   readonly pageCount: number;
   /** Whether the scheme's openable candidate list (the Korean Hanja list, the Zhuyin list) is on the strip; see `candidateListOpen`. */
   readonly candidateListOpen: boolean;
+  /** 九宫格候选筛选的当前状态，展开面板的「全部/单字」和笔画栏照它画。 */
+  readonly nineKeySingleCharacter: boolean;
+  readonly nineKeyStrokes: string;
 }
 
 interface EngineValue {
@@ -766,6 +777,8 @@ interface PreparedPreferences {
   touch_keyboard_height_adjustment: number;
   /** Show the native Harmony voice entry in the top touch-keyboard shortcut bar. */
   touch_voice_shortcut: boolean;
+  /** 九键数字层的排列：`phone`（1 2 3 在上）或 `calculator`（7 8 9 在上）；旧文档没有这个键，按 `phone`。 */
+  touch_number_keypad_order?: string;
   /** Shared privacy switch for the private clipboard history file and keyboard entry point. */
   clipboard_history: boolean;
   voice_input: VoiceInputConfiguration;
@@ -900,6 +913,13 @@ export interface KeyboardPreferences {
   readonly rowSpacingTenths: number;
   readonly heightAdjustment: number;
   readonly voiceShortcut: boolean;
+  /** `NumberKeypadOrder` 归一后的九键数字层排列。 */
+  readonly numberKeypadOrder: string;
+}
+
+/** 刚保存的整份偏好文档，按键盘关心的字段读回来，替换缓存里那份准备时的偏好。 */
+interface PreparedSnapshot {
+  preferences: PreparedPreferences;
 }
 
 interface PreparedOptions {
@@ -1127,7 +1147,8 @@ export class KeyboardSession implements HardwareKeyTarget {
     keySpacingTenths: KeyboardGeometry.DEFAULT_KEY_SPACING_TENTHS,
     rowSpacingTenths: KeyboardGeometry.DEFAULT_ROW_SPACING_TENTHS,
     heightAdjustment: KeyboardGeometry.DEFAULT_HEIGHT_ADJUSTMENT_VP,
-    voiceShortcut: false
+    voiceShortcut: false,
+    numberKeypadOrder: NumberKeypadOrder.PHONE
   };
   private voiceInput: VoiceInputConfiguration = DEFAULT_VOICE_INPUT_CONFIGURATION;
   /**
@@ -1393,7 +1414,8 @@ export class KeyboardSession implements HardwareKeyTarget {
       rowSpacingTenths: KeyboardGeometry.rowSpacing(preferences.touch_row_spacing_tenths),
       heightAdjustment:
         KeyboardGeometry.heightAdjustment(preferences.touch_keyboard_height_adjustment),
-      voiceShortcut: preferences.touch_voice_shortcut
+      voiceShortcut: preferences.touch_voice_shortcut,
+      numberKeypadOrder: NumberKeypadOrder.normalized(preferences.touch_number_keypad_order)
     };
     // The theme's bar, then the package's `[toolbar]` colours for that mode, then its stylesheet.
     const toolbarColors: CandidateColors = GlobalTheme.candidateColors(
@@ -1690,6 +1712,8 @@ export class KeyboardSession implements HardwareKeyTarget {
    * The settings page is another process writing the same document. Windows pushes a change to the running server and polls as a fallback (`WM_APPLY_IME_CONFIG`, `TIMER_ID_CONFIG_SYNC`); here the keyboard compares the stored revision each time an editor takes focus, which is the first moment anyone could type with the new settings, and costs one small read rather than a timer. A composition in progress is left alone and the next focus picks the change up.
    */
   reloadChangedPreferences(): void {
+    // 按键反馈不在偏好文档里，没有版本号可比：设置页改了振动档位，只看版本号的话要等输入法进程重启才生效。它是一个很小的文件，每次聚焦重读一遍，组字中也不影响什么。
+    this.reloadFeedback();
     if (this.handle === 0 || this.composing() || this.localMode !== 'none') {
       return;
     }
@@ -1778,12 +1802,9 @@ export class KeyboardSession implements HardwareKeyTarget {
   selectGlobalTheme(id: string): boolean {
     const changes: Map<string, Object> = new Map<string, Object>();
     changes.set('global_theme', id);
+    // changePreferences 存好后已经按存下的文档重算了外观。
     if (!this.changePreferences(changes)) {
       return false;
-    }
-    if (this.preparedPreferences !== undefined) {
-      this.preparedPreferences.global_theme = id;
-      this.applyAppearance(this.preparedPreferences);
     }
     this.refreshToolbar();
     return true;
@@ -2238,7 +2259,12 @@ export class KeyboardSession implements HardwareKeyTarget {
    */
   private refreshKeyStatistics(): void {
     if (this.stateDirectory.length === 0) return;
+    const generation: number = this.attributeGeneration;
+    const inputClient: inputMethodEngine.InputClient | undefined = this.inputClient;
+    if (inputClient === undefined) return;
     taskpool.execute(readTypingStatisticsEnabled, this.stateDirectory).then((value: Object): void => {
+      if (!TypingStatisticsPolicy.isCurrentGeneration(generation, this.attributeGeneration)
+        || inputClient !== this.inputClient) return;
       this.keyStatisticsEnabled = (value as number) === 1;
       if (!this.keyStatisticsEnabled) {
         this.cancelKeyFlushTimer();
@@ -2563,10 +2589,11 @@ export class KeyboardSession implements HardwareKeyTarget {
 
   voiceInputConfiguration(): VoiceInputConfiguration {
     const root: string = this.clipboardRoot();
-    return {
-      ...this.voiceInput,
-      local_model_root: root.length > 0 ? `${root}/voice-models` : ''
-    };
+    // 交出去的是一份拷贝，受管目录不能写回缓存的配置。ArkTS 不能展开对象（arkts-no-spread），配置里只有字符串、布尔和 token 表，JSON 往返拷贝不丢东西。
+    const configuration: VoiceInputConfiguration =
+      JSON.parse(JSON.stringify(this.voiceInput)) as VoiceInputConfiguration;
+    configuration.local_model_root = root.length > 0 ? `${root}/voice-models` : '';
+    return configuration;
   }
 
   /** The prepared host options the on-device recognizer reads the user's own words through, or null before the host has been prepared. */
@@ -2812,22 +2839,34 @@ export class KeyboardSession implements HardwareKeyTarget {
 
   /** Invalidate host-side network work before the focused editor changes or the session dies. */
   private cancelOnlineProviders(): void {
+    this.invalidateOnlineProviders();
+    this.invalidateTranslationProviders();
+  }
+
+  private invalidateOnlineProviders(): void {
+    if (!OnlineCandidatePolicy.hasActiveWork(
+      this.onlineSignature, this.onlineTimer >= 0, this.onlineRequests.size)) return;
     this.onlineEpoch++;
     this.onlineSignature = '';
-    for (const request of this.onlineRequests) request.destroy();
-    this.onlineRequests.clear();
     if (this.onlineTimer >= 0) {
       clearTimeout(this.onlineTimer);
       this.onlineTimer = -1;
     }
+    for (const request of this.onlineRequests) request.destroy();
+    this.onlineRequests.clear();
+  }
+
+  private invalidateTranslationProviders(): void {
+    if (!TranslationPolicy.hasActiveWork(
+      this.translationSignature, this.translationTimer >= 0, this.translationRequests.size)) return;
     this.translationEpoch++;
     this.translationSignature = '';
-    for (const request of this.translationRequests) request.destroy();
-    this.translationRequests.clear();
     if (this.translationTimer >= 0) {
       clearTimeout(this.translationTimer);
       this.translationTimer = -1;
     }
+    for (const request of this.translationRequests) request.destroy();
+    this.translationRequests.clear();
   }
 
   /** Invalidate asynchronous reply work without logging or retaining editor text. */
@@ -3754,7 +3793,9 @@ export class KeyboardSession implements HardwareKeyTarget {
         diagnostic: this.diagnostic,
         page: view.page,
         pageCount: view.page_count,
-        candidateListOpen: this.candidateListOpen()
+        candidateListOpen: this.candidateListOpen(),
+        nineKeySingleCharacter: view.nine_key_single_character === true,
+        nineKeyStrokes: view.nine_key_strokes ?? ''
       });
     }
     if (this.onCandidateWidth !== undefined) {
@@ -3802,7 +3843,9 @@ export class KeyboardSession implements HardwareKeyTarget {
       spellings: view.nine_key_spellings,
       scheme: view.scheme, shuangpinProfile: view.shuangpin_profile, localMode: view.local_mode,
       english: view.dedicated_english, diagnostic: this.diagnostic,
-      page: view.page, pageCount: view.page_count, candidateListOpen: this.candidateListOpen()
+      page: view.page, pageCount: view.page_count, candidateListOpen: this.candidateListOpen(),
+      nineKeySingleCharacter: view.nine_key_single_character === true,
+      nineKeyStrokes: view.nine_key_strokes ?? ''
     });
     if (this.onCandidateWidth !== undefined) {
       this.onCandidateWidth(this.candidateWidthVp(entries, reading, view.page, view.page_count));
@@ -3814,14 +3857,15 @@ export class KeyboardSession implements HardwareKeyTarget {
   private static drawnReading(view: EngineView): string {
     return SchemeCompositionPolicy.reading(
       SchemeCompositionPolicy.rulesScheme(view.scheme, view.dedicated_english, view.local_mode),
-      view.editing_text, view.preedit);
+      view.editing_text, view.preedit, view.nine_key_reading ?? '');
   }
 
   /** The caret within drawnReading: the Engine's own for a spelling, the end of a composition the scheme keeps the caret at the end of (a Vietnamese caret_position is a byte offset into a word that is not ASCII, so it is never used as an index). */
   private static drawnCaret(view: EngineView, reading: string): number {
-    return SchemeCompositionPolicy.caret(
-      SchemeCompositionPolicy.rulesScheme(view.scheme, view.dedicated_english, view.local_mode),
-      view.caret_position, reading);
+    const rulesScheme: number =
+      SchemeCompositionPolicy.rulesScheme(view.scheme, view.dedicated_english, view.local_mode);
+    return SchemeCompositionPolicy.caret(rulesScheme, view.caret_position, reading,
+      SchemeCompositionPolicy.drawsNineKeyReading(rulesScheme, view.editing_text, view.nine_key_reading ?? ''));
   }
 
   /** A horizontal candidate window on a machine with its own keys is as wide as its whole page; a vertical list is as wide as its widest row. A 2in1 window that shows the composition line also makes room on it for the brand mark and the page indicator. */
@@ -3860,7 +3904,9 @@ export class KeyboardSession implements HardwareKeyTarget {
       scheme: view?.scheme ?? this.scheme, shuangpinProfile: view?.shuangpin_profile ?? this.profileName,
       localMode: view?.local_mode ?? this.localMode,
       english: view?.dedicated_english ?? this.englishMode, diagnostic: this.diagnostic,
-      page: 0, pageCount: 1, candidateListOpen: false
+      page: 0, pageCount: 1, candidateListOpen: false,
+      nineKeySingleCharacter: view?.nine_key_single_character === true,
+      nineKeyStrokes: view?.nine_key_strokes ?? ''
     });
     if (this.onCandidateWidth !== undefined) {
       this.onCandidateWidth(this.candidateWidthVp(entries, view?.editing_text ?? this.editing, 0, 1));
@@ -3875,17 +3921,18 @@ export class KeyboardSession implements HardwareKeyTarget {
       reply = JSON.parse(client.onlineQuery(this.handle)) as NativeReply<OnlineQuery | null>;
     } catch (error) {
       KeyboardLog.error(`online query unavailable: ${describeError(error)}`);
+      this.invalidateOnlineProviders();
       return;
     }
     const query: OnlineQuery | null = NativeReplyPolicy.successfulValue<OnlineQuery>(reply);
     if (query === null) {
-      this.onlineSignature = '';
+      this.invalidateOnlineProviders();
       return;
     }
     const signature: string = OnlineCandidatePolicy.signature(query);
     if (signature === this.onlineSignature) return;
+    this.invalidateOnlineProviders();
     this.onlineSignature = signature;
-    if (this.onlineTimer >= 0) clearTimeout(this.onlineTimer);
     const epoch: number = ++this.onlineEpoch;
     const handle: number = this.handle;
     const requestSignature: string = signature;
@@ -4028,17 +4075,18 @@ export class KeyboardSession implements HardwareKeyTarget {
       reply = JSON.parse(client.translationQuery(this.handle)) as NativeReply<TranslationQuery | null>;
     } catch (error) {
       KeyboardLog.error(`translation query unavailable: ${describeError(error)}`);
+      this.invalidateTranslationProviders();
       return;
     }
     const query: TranslationQuery | null = NativeReplyPolicy.successfulValue<TranslationQuery>(reply);
     if (query === null) {
-      this.translationSignature = '';
+      this.invalidateTranslationProviders();
       return;
     }
     const signature: string = TranslationPolicy.signature(query);
     if (signature === this.translationSignature) return;
+    this.invalidateTranslationProviders();
     this.translationSignature = signature;
-    if (this.translationTimer >= 0) clearTimeout(this.translationTimer);
     const epoch: number = ++this.translationEpoch;
     const handle: number = this.handle;
     const requestSignature: string = signature;
@@ -4385,24 +4433,35 @@ export class KeyboardSession implements HardwareKeyTarget {
 
   private recordTranslation(query: TranslationQuery, target: string, item: TranslationPlanItem,
     value: string | null, entries: TranslationEntry[]): void {
+    const key: string = TranslationPolicy.cacheKey(query, target, item);
     // A `/fy` answer is the command's row, not a candidate gloss: it is neither cached nor remembered as a failure.
     if (query.sentence === true) {
       if (value !== null) TranslationPolicy.append(entries, item.text, value);
       return;
     }
     if (value === null) {
-      this.translationNegativeCache.set(TranslationPolicy.cacheKey(query, target, item),
-        Date.now() + TranslationPolicy.NEGATIVE_CACHE_MS);
+      if (!this.translationNegativeCache.has(key)
+        && TranslationPolicy.shouldResetCache(this.translationNegativeCache.size)) {
+        this.translationNegativeCache.clear();
+      }
+      this.translationNegativeCache.set(key, Date.now() + TranslationPolicy.NEGATIVE_CACHE_MS);
       return;
     }
     const normalised: string = TranslationPolicy.normalise(value);
     if (normalised.length === 0) {
-      this.translationNegativeCache.set(TranslationPolicy.cacheKey(query, target, item),
-        Date.now() + TranslationPolicy.NEGATIVE_CACHE_MS);
+      if (!this.translationNegativeCache.has(key)
+        && TranslationPolicy.shouldResetCache(this.translationNegativeCache.size)) {
+        this.translationNegativeCache.clear();
+      }
+      this.translationNegativeCache.set(key, Date.now() + TranslationPolicy.NEGATIVE_CACHE_MS);
       return;
     }
-    this.translationCache.set(TranslationPolicy.cacheKey(query, target, item), normalised);
-    this.translationNegativeCache.delete(TranslationPolicy.cacheKey(query, target, item));
+    if (!this.translationCache.has(key)
+      && TranslationPolicy.shouldResetCache(this.translationCache.size)) {
+      this.translationCache.clear();
+    }
+    this.translationCache.set(key, normalised);
+    this.translationNegativeCache.delete(key);
     TranslationPolicy.append(entries, item.text, normalised);
   }
 
@@ -4473,7 +4532,8 @@ export class KeyboardSession implements HardwareKeyTarget {
         || KeyboardSession.safePrivateFile(path, KeyboardFeedback.MAX_BYTES) === null) {
         return KeyboardFeedback.DEFAULTS;
       }
-      return KeyboardFeedback.parse(fs.readTextSync(path));
+      const text: string | null = KeyboardSession.readPrivateText(path, KeyboardFeedback.MAX_BYTES);
+      return text === null ? KeyboardFeedback.DEFAULTS : KeyboardFeedback.parse(text);
     } catch (error) {
       KeyboardLog.error(`key feedback unreadable: ${describeError(error)}`);
       return KeyboardFeedback.DEFAULTS;
@@ -4493,17 +4553,10 @@ export class KeyboardSession implements HardwareKeyTarget {
   static saveFeedbackIn(stateRoot: string, settings: FeedbackSettings): boolean {
     try {
       const path: string = KeyboardSession.feedbackFileIn(stateRoot);
-      if (!KeyboardSession.safeStateDirectory(stateRoot) || KeyboardSession.isSymbolicLink(path)) {
+      if (!KeyboardSession.safeStateDirectory(stateRoot)) {
         return false;
       }
-      const handle = fs.openSync(path,
-        fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
-      try {
-        fs.writeSync(handle.fd, KeyboardFeedback.serialize(settings));
-      } finally {
-        fs.closeSync(handle);
-      }
-      return true;
+      return KeyboardSession.writePrivateText(path, KeyboardFeedback.serialize(settings));
     } catch (error) {
       KeyboardLog.error(`key feedback not saved: ${describeError(error)}`);
       return false;
@@ -4516,7 +4569,9 @@ export class KeyboardSession implements HardwareKeyTarget {
       if (KeyboardSession.safePrivateFile(this.feedbackFile(), KeyboardFeedback.MAX_BYTES) === null) {
         return KeyboardFeedback.DEFAULTS;
       }
-      return KeyboardFeedback.parse(fs.readTextSync(this.feedbackFile()));
+      const text: string | null = KeyboardSession.readPrivateText(
+        this.feedbackFile(), KeyboardFeedback.MAX_BYTES);
+      return text === null ? KeyboardFeedback.DEFAULTS : KeyboardFeedback.parse(text);
     } catch (error) {
       KeyboardLog.error(`key feedback unreadable: ${describeError(error)}`);
       return KeyboardFeedback.DEFAULTS;
@@ -4526,15 +4581,11 @@ export class KeyboardSession implements HardwareKeyTarget {
   saveFeedback(settings: FeedbackSettings): boolean {
     try {
       const path: string = this.feedbackFile();
-      if (!KeyboardSession.safeStateDirectory(this.stateDirectory) || KeyboardSession.isSymbolicLink(path)) {
+      if (!KeyboardSession.safeStateDirectory(this.stateDirectory)) {
         return false;
       }
-      const handle = fs.openSync(path,
-        fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
-      try {
-        fs.writeSync(handle.fd, KeyboardFeedback.serialize(settings));
-      } finally {
-        fs.closeSync(handle);
+      if (!KeyboardSession.writePrivateText(path, KeyboardFeedback.serialize(settings))) {
+        return false;
       }
       this.feedbackSettings = settings;
       return true;
@@ -4542,6 +4593,14 @@ export class KeyboardSession implements HardwareKeyTarget {
       KeyboardLog.error(`key feedback not saved: ${describeError(error)}`);
       return false;
     }
+  }
+
+  /** 设置页（另一个进程）写的按键反馈，在下一次聚焦时读进来。 */
+  private reloadFeedback(): void {
+    if (this.stateDirectory.length === 0) {
+      return;
+    }
+    this.feedbackSettings = this.feedback();
   }
 
   /**
@@ -4556,13 +4615,49 @@ export class KeyboardSession implements HardwareKeyTarget {
       return;
     }
     try {
-      vibrator.startVibration(
-        { type: 'time', duration: KeyboardFeedback.duration(settings.strength) },
-        { usage: 'physicalFeedback' });
+      KeyboardSession.vibrate(settings.strength).catch((error: Object): void => {
+        this.vibratorFailed = true;
+        KeyboardLog.error(`vibration unavailable: ${describeError(error)}`);
+      });
     } catch (error) {
       this.vibratorFailed = true;
       KeyboardLog.error(`vibration unavailable: ${describeError(error)}`);
     }
+  }
+
+  /** 每个预置效果设备支不支持，查一次记住：按键时不再每下都问系统。 */
+  private static readonly effectSupport: Map<string, boolean> = new Map<string, boolean>();
+
+  private static supportsEffect(effectId: string): boolean {
+    const known: boolean | undefined = KeyboardSession.effectSupport.get(effectId);
+    if (known !== undefined) {
+      return known;
+    }
+    let supported: boolean = false;
+    try {
+      supported = vibrator.isSupportEffectSync(effectId);
+    } catch (error) {
+      KeyboardLog.error(`vibration effect ${effectId} unavailable: ${describeError(error)}`);
+    }
+    KeyboardSession.effectSupport.set(effectId, supported);
+    return supported;
+  }
+
+  /**
+   * 按一档振一下，按键和设置页的试听共用。档位怎么振见 `KeyboardFeedback.plan`：设备支持预置效果就用效果加强度，不支持就按时长振；「跟随系统」用 `touch` 用途，由系统的触感反馈设置决定振不振、多强，不带自定义强度。
+   */
+  static vibrate(strength: HapticStrength): Promise<void> {
+    const plan: HapticPlan = KeyboardFeedback.plan(strength);
+    const attribute: vibrator.VibrateAttribute = { usage: plan.followsSystem ? 'touch' : 'physicalFeedback' };
+    if (!KeyboardSession.supportsEffect(plan.effectId)) {
+      const timed: vibrator.VibrateTime = { type: 'time', duration: plan.fallbackMillis };
+      return vibrator.startVibration(timed, attribute);
+    }
+    const preset: vibrator.VibratePreset = { type: 'preset', effectId: plan.effectId, count: 1 };
+    if (plan.intensity > 0) {
+      preset.intensity = plan.intensity;
+    }
+    return vibrator.startVibration(preset, attribute);
   }
 
   /** `stateRoot` is `<files>/state`; the shared mobile store owns `<files>/MSIME`. */
@@ -4748,7 +4843,8 @@ export class KeyboardSession implements HardwareKeyTarget {
       if (KeyboardSession.safePrivateFile(file, EMOJI_RECENTS_MAX_BYTES) === null) {
         return [];
       }
-      return EmojiCatalogModel.parseRecents(fs.readTextSync(file));
+      const text: string | null = KeyboardSession.readPrivateText(file, EMOJI_RECENTS_MAX_BYTES);
+      return text === null ? [] : EmojiCatalogModel.parseRecents(text);
     } catch (error) {
       KeyboardLog.error(`emoji recents unavailable: ${describeError(error)}`);
       return [];
@@ -4768,16 +4864,10 @@ export class KeyboardSession implements HardwareKeyTarget {
     }
     try {
       const path: string = this.emojiRecentsFile();
-      if (!KeyboardSession.safeStateDirectory(this.stateDirectory) || KeyboardSession.isSymbolicLink(path)) {
+      if (!KeyboardSession.safeStateDirectory(this.stateDirectory)) {
         return recents;
       }
-      const handle = fs.openSync(path,
-        fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
-      try {
-        fs.writeSync(handle.fd, EmojiCatalogModel.serializeRecents(recents));
-      } finally {
-        fs.closeSync(handle);
-      }
+      KeyboardSession.writePrivateText(path, EmojiCatalogModel.serializeRecents(recents));
     } catch (error) {
       KeyboardLog.error(`emoji recents not persisted: ${describeError(error)}`);
     }
@@ -4790,17 +4880,10 @@ export class KeyboardSession implements HardwareKeyTarget {
     }
     try {
       const path: string = this.emojiRecentsFile();
-      if (!KeyboardSession.safeStateDirectory(this.stateDirectory) || KeyboardSession.isSymbolicLink(path)) {
+      if (!KeyboardSession.safeStateDirectory(this.stateDirectory)) {
         return false;
       }
-      const handle = fs.openSync(path,
-        fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
-      try {
-        fs.writeSync(handle.fd, '[]');
-      } finally {
-        fs.closeSync(handle);
-      }
-      return true;
+      return KeyboardSession.writePrivateText(path, '[]');
     } catch (error) {
       KeyboardLog.error(`emoji recents not cleared: ${describeError(error)}`);
       return false;
@@ -4864,7 +4947,9 @@ export class KeyboardSession implements HardwareKeyTarget {
         || KeyboardSession.safePrivateFile(file, CommunityReplyLibraryPolicy.MAX_BYTES) === null) {
         return [];
       }
-      return CommunityReplyLibraryPolicy.parse(fs.readTextSync(file));
+      const text: string | null = KeyboardSession.readPrivateText(
+        file, CommunityReplyLibraryPolicy.MAX_BYTES);
+      return text === null ? [] : CommunityReplyLibraryPolicy.parse(text);
     } catch (error) {
       KeyboardLog.error(`community reply library unavailable: ${describeError(error)}`);
       return [];
@@ -4886,6 +4971,51 @@ export class KeyboardSession implements HardwareKeyTarget {
       return !stat.isSymbolicLink() && stat.isFile() && stat.size <= maximumBytes ? stat : null;
     } catch {
       return null;
+    }
+  }
+
+  private static writePrivateText(path: string, text: string): boolean {
+    const staging: string = `${path}.${util.generateRandomUUID(false)}.tmp`;
+    let renamed: boolean = false;
+    try {
+      const handle: fs.File = fs.openSync(staging,
+        fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+      try {
+        const written: number = fs.writeSync(handle.fd, text);
+        if (!utf8WriteComplete(text, written)) throw new Error('private_write');
+      } finally {
+        fs.closeSync(handle);
+      }
+      fs.renameSync(staging, path);
+      renamed = true;
+      return true;
+    } finally {
+      if (!renamed) {
+        try {
+          if (fs.accessSync(staging)) fs.unlinkSync(staging);
+        } catch {
+          // A failed private write may leave only its uniquely named staging file.
+        }
+      }
+    }
+  }
+
+  private static readPrivateText(path: string, maximumBytes: number): string | null {
+    let handle: fs.File | null = null;
+    try {
+      const expected: fs.Stat | null = KeyboardSession.safePrivateFile(path, maximumBytes);
+      if (expected === null) return null;
+      handle = fs.openSync(path, fs.OpenMode.READ_ONLY);
+      const stat: fs.Stat = fs.statSync(handle.fd);
+      if (!stat.isFile() || stat.size > maximumBytes || stat.ino !== expected.ino) return null;
+      const buffer: ArrayBuffer = new ArrayBuffer(stat.size + 1);
+      const count: number = fs.readSync(handle.fd, buffer);
+      if (count !== stat.size) return null;
+      return util.TextDecoder.create('utf-8').decode(new Uint8Array(buffer, 0, count));
+    } catch {
+      return null;
+    } finally {
+      if (handle !== null) fs.closeSync(handle);
     }
   }
 
@@ -5104,6 +5234,7 @@ export class KeyboardSession implements HardwareKeyTarget {
         // Our own write, already applied; the next focus must not rebuild the session for it. The revision is the store's answer rather than expected + 1: a save that changes nothing keeps the stored revision, and assuming the next one would make the next real change made elsewhere look like this one.
         this.preferencesRevision = saved.value.revision;
       }
+      this.refreshPreparedPreferences(document);
       this.clipboardHistoryEnabled = nextClipboardHistory;
       if (changes.has('voice_input')) {
         this.voiceInput = snapshot.preferences.voice_input as VoiceInputConfiguration;
@@ -5122,6 +5253,17 @@ export class KeyboardSession implements HardwareKeyTarget {
       KeyboardLog.error(`preferences failed: ${describeError(error)}`);
       return false;
     }
+  }
+
+  /**
+   * 把刚交给会话的整份文档换成缓存的偏好，并按它重算外观，让 `preferences()` 立刻反映这次改动。
+   *
+   * 以前只有 `selectGlobalTheme` 自己补这一步，其他改动（键盘里拖高度、间距，± 按钮）存进文档、版本号也跟上了，`preferences()` 却还是准备会话时的旧值：视图存完立刻读回旧高度，拖动弹回原位、± 不累加，面板尺寸也按旧值算；下次聚焦时版本号已经一致，不会重建，旧值就一直留着。
+   */
+  private refreshPreparedPreferences(document: string): void {
+    const saved: PreparedSnapshot = JSON.parse(document) as PreparedSnapshot;
+    this.preparedPreferences = saved.preferences;
+    this.applyAppearance(saved.preferences);
   }
 
   /**
@@ -5818,5 +5960,15 @@ export class KeyboardSession implements HardwareKeyTarget {
       return;
     }
     this.apply(client.chooseNineKeySpelling(this.handle, this.generation, index));
+  }
+
+  /**
+   * 九宫格候选筛选：`singleCharacter` 只留单字，`strokes` 是首字的笔顺前缀（`hspnz`，空串不按笔画筛）。只在组字时有意义，引擎在组字结束时自己清掉；笔画词库不可用时引擎带回诊断、筛选不变，诊断照常画在读音行上。
+   */
+  setNineKeyFilter(singleCharacter: boolean, strokes: string): void {
+    if (this.handle === 0 || !this.composing()) {
+      return;
+    }
+    this.apply(client.setNineKeyFilter(this.handle, singleCharacter, strokes));
   }
 }

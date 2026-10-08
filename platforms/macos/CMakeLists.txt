@@ -317,6 +317,16 @@ add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provid
 add_custom_target(desktop-dictionary-provider-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provider-test")
 add_test(NAME desktop-dictionary-provider COMMAND "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provider-test")
 set_tests_properties(desktop-dictionary-provider PROPERTIES TIMEOUT 30)
+set(MSIME_SECURE_FILE_READER_SOURCES src/backend/dictionary/BackendSecureFileReader.swift tests/dictionary/SecureFileReaderTest.swift)
+list(TRANSFORM MSIME_SECURE_FILE_READER_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test"
+  COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library
+    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
+    ${MSIME_SECURE_FILE_READER_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test"
+  DEPENDS ${MSIME_SECURE_FILE_READER_SOURCES} VERBATIM)
+add_custom_target(secure-file-reader-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test")
+add_test(NAME secure-file-reader COMMAND "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test")
+set_tests_properties(secure-file-reader PROPERTIES TIMEOUT 30)
 set(MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES
   ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift
   ../../shared/backend/clients/BackendClipboardClient.swift src/backend/clipboard/BackendCloudClipboardProvider.swift
@@ -912,6 +922,11 @@ add_test(NAME candidate-panel COMMAND candidate-panel-test)
 add_executable(translation-senses-agreement-test tests/candidate/TranslationSensesAgreementTest.cpp)
 target_compile_options(translation-senses-agreement-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME translation-senses-agreement COMMAND translation-senses-agreement-test)
+# The readings drawn after gloss lines: language per line, romaji from the system tokenizer, and the drawn string.
+add_executable(candidate-pronunciation-test tests/candidate/CandidatePronunciationTest.mm)
+target_compile_options(candidate-pronunciation-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(candidate-pronunciation-test PRIVATE "-framework Foundation")
+add_test(NAME candidate-pronunciation COMMAND candidate-pronunciation-test)
 # The Windows candidate_item_layout rule, ported: text, 辅助码 and glosses wider than their column wrap inside it and rows take their own heights.
 add_executable(candidate-item-layout-test tests/candidate/CandidateItemLayoutTest.cpp)
 target_compile_options(candidate-item-layout-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)

@@ -27,7 +27,7 @@ import org.json.JSONObject;
  *
  * <p>设置应用和 :ime 进程是同一个 UID，读写同一个文件。写入在同目录的锁文件上加进程间文件锁，读出、修改、写到临时文件再原子改名；读取按文件的 inode、修改时间和大小缓存，文件被另一进程换掉后下一次 {@link #load} 就读到新值。文件缺失、过大、损坏或某一项取值不合规时，那一项（或整份）回到默认值；读取从不改写文件。
  *
- * <p>键名与账号设置文档的同步键相同（`general.app_theme`、`platform.android.*`）。{@link Spec#synced} 为真的十七项随云同步交给 client-core 的 `android_local`（crates/client-core/src/account/settings_sync.rs 的 `ANDROID_LOCAL_SETTINGS`，两边的键与取值范围由 AndroidLocalSettingsSmoke 锁住）；隐私模式、语音数据贡献、开发者选项和键盘高度只留在本机。
+ * <p>键名与账号设置文档的同步键相同（`general.app_theme`、`platform.android.*`）。{@link Spec#synced} 为真的十七项随云同步交给 client-core 的 `android_local`（crates/client-core/src/account/settings_sync.rs 的 `ANDROID_LOCAL_SETTINGS`，两边的键与取值范围由 AndroidLocalSettingsSmoke 锁住）；隐私模式、语音数据贡献、开发者选项、键盘高度、浮动键盘的开关与位置和工具栏上的浮动键盘按钮只留在本机。
  */
 public final class AndroidLocalSettings {
     public static final String FILE_NAME = "android-settings.json";
@@ -61,8 +61,21 @@ public final class AndroidLocalSettings {
     public static final String VOICE_CONTRIBUTE_AUDIO = "platform.android.voice_contribute_audio";
     /** 「滑行输入」（{@link GlideTypingPolicy}），默认关。服务端的同步字段表还没有这个键，所以先只在本机。 */
     public static final String GLIDE_TYPING = "platform.android.glide_typing";
-    /** 设计范围的键盘高度调整（dp，-46..55，即 75%..130%）。缺省时宿主沿用共享偏好里的 `touch_keyboard_height_adjustment`（-12..48）。 */
+    /** 拼音九键网格键的滑动（{@link NineKeySwipePolicy}）：关闭、上滑输入数字或下滑输入数字，默认关闭，不改变原来九键的点按。和 26 键的「滑动输入符号」分开，服务端的同步字段表还没有这个键，所以先只在本机。 */
+    public static final String NINE_KEY_SWIPE = "platform.android.nine_key_swipe";
+    /** 拼音九键和笔画键盘左侧符号栏的符号（{@link NineKeySidebarPolicy}），用空格分开。服务端的同步字段表还没有这个键，所以先只在本机。 */
+    public static final String NINE_KEY_SYMBOLS = "platform.android.nine_key_symbols";
+    /** 拼音九键数字键面左侧符号栏的符号，格式同 {@link #NINE_KEY_SYMBOLS}，同样只在本机。 */
+    public static final String NINE_KEY_DIGIT_SYMBOLS = "platform.android.nine_key_digit_symbols";
+    /** 设计范围的键盘高度调整（dp，-46..110，即 75%..160%）。缺省时宿主沿用共享偏好里的 `touch_keyboard_height_adjustment`（-12..48）。 */
     public static final String KEYBOARD_HEIGHT_ADJUSTMENT = "platform.android.keyboard_height_adjustment";
+    /** 浮动键盘（{@link FloatingKeyboardPolicy}），默认关。位置与屏幕尺寸相关，开关与位置都只在本机，不随账号同步。 */
+    public static final String FLOATING_KEYBOARD = "platform.android.floating_keyboard";
+    /** 浮动键盘在可移动范围里的水平 / 竖直位置，千分比（0 最左 / 最上，1000 最右 / 最下）。 */
+    public static final String FLOATING_KEYBOARD_X = "platform.android.floating_keyboard_x";
+    public static final String FLOATING_KEYBOARD_Y = "platform.android.floating_keyboard_y";
+    /** 工具栏上的「浮动键盘」按钮，默认不显示；同步的工具栏开关表在 Rust 的 `ANDROID_LOCAL_SETTINGS` 里，这一项先只在本机。 */
+    public static final String TOOLBAR_FLOATING = "platform.android.toolbar_floating";
     public static final String DEVELOPER_DEBUG_OVERLAY = "platform.android.developer.debug_overlay";
     public static final String DEVELOPER_LOG_LEVEL = "platform.android.developer.log_level";
     /** 「记录输入日志」：只记时间和事件种类，不记按键内容、文本和候选。 */
@@ -73,29 +86,33 @@ public final class AndroidLocalSettings {
     public static final String MCP_INPUT_EVENTS = "platform.android.developer.mcp_input_events";
     public static final String MCP_CONFIG_SNAPSHOT = "platform.android.developer.mcp_config_snapshot";
 
-    public static final int HEIGHT_ADJUSTMENT_MIN = -46;
-    public static final int HEIGHT_ADJUSTMENT_MAX = 55;
+    /** 与 {@link KeyboardGeometry#MIN_DESIGN_HEIGHT_ADJUSTMENT_DP} / {@link KeyboardGeometry#MAX_DESIGN_HEIGHT_ADJUSTMENT_DP} 相同。 */
+    public static final int HEIGHT_ADJUSTMENT_MIN = KeyboardGeometry.MIN_DESIGN_HEIGHT_ADJUSTMENT_DP;
+    public static final int HEIGHT_ADJUSTMENT_MAX = KeyboardGeometry.MAX_DESIGN_HEIGHT_ADJUSTMENT_DP;
 
     /** 一项设置的类型、默认值与取值范围。 */
     public static final class Spec {
-        public enum Kind { BOOLEAN, CHOICE, INTEGER }
+        public enum Kind { BOOLEAN, CHOICE, INTEGER, TEXT }
 
         public final String key;
         public final Kind kind;
         public final Object defaultValue;
         public final boolean synced;
         private final String[] choices;
+        /** TEXT 项的规范化：合规时返回存储用的文本，否则 null。 */
+        private final java.util.function.UnaryOperator<String> normalizer;
         public final int min;
         public final int max;
         public final int step;
 
         private Spec(String key, Kind kind, Object defaultValue, boolean synced,
-                     String[] choices, int min, int max, int step) {
+                     String[] choices, java.util.function.UnaryOperator<String> normalizer, int min, int max, int step) {
             this.key = key;
             this.kind = kind;
             this.defaultValue = defaultValue;
             this.synced = synced;
             this.choices = choices;
+            this.normalizer = normalizer;
             this.min = min;
             this.max = max;
             this.step = step;
@@ -112,6 +129,8 @@ public final class AndroidLocalSettings {
                     if (!(raw instanceof String text)) return null;
                     for (String choice : choices) if (choice.equals(text)) return choice;
                     return null;
+                case TEXT:
+                    return raw instanceof String text ? normalizer.apply(text) : null;
                 default:
                     if (!(raw instanceof Number number)) return null;
                     double value = number.doubleValue();
@@ -123,7 +142,7 @@ public final class AndroidLocalSettings {
         }
     }
 
-    private static final Map<String, Spec> SPECS = new LinkedHashMap<>(29);
+    private static final Map<String, Spec> SPECS = new LinkedHashMap<>(33);
 
     static {
         choice(APP_THEME, "siji", true, "siji", "chunya", "xiayin", "qiushan", "dongxue");
@@ -148,7 +167,19 @@ public final class AndroidLocalSettings {
         bool(INCOGNITO, false, false);
         bool(VOICE_CONTRIBUTE_AUDIO, false, false);
         bool(GLIDE_TYPING, false, false);
+        choice(NINE_KEY_SWIPE, NineKeySwipePolicy.OFF, false, NineKeySwipePolicy.OFF, SwipeHintPolicy.UP,
+            SwipeHintPolicy.DOWN);
+        text(NINE_KEY_SYMBOLS, NineKeySidebarPolicy.format(NineKeySidebarPolicy.DEFAULT_LETTER_SYMBOLS), false,
+            NineKeySidebarPolicy::normalize);
+        text(NINE_KEY_DIGIT_SYMBOLS, NineKeySidebarPolicy.format(NineKeySidebarPolicy.DEFAULT_DIGIT_SYMBOLS), false,
+            NineKeySidebarPolicy::normalize);
         integer(KEYBOARD_HEIGHT_ADJUSTMENT, 0, false, HEIGHT_ADJUSTMENT_MIN, HEIGHT_ADJUSTMENT_MAX, 1);
+        bool(FLOATING_KEYBOARD, false, false);
+        integer(FLOATING_KEYBOARD_X, FloatingKeyboardPolicy.DEFAULT_X_FRACTION, false, 0,
+            FloatingKeyboardPolicy.MAX_FRACTION, 1);
+        integer(FLOATING_KEYBOARD_Y, FloatingKeyboardPolicy.DEFAULT_Y_FRACTION, false, 0,
+            FloatingKeyboardPolicy.MAX_FRACTION, 1);
+        bool(TOOLBAR_FLOATING, false, false);
         bool(DEVELOPER_DEBUG_OVERLAY, false, false);
         choice(DEVELOPER_LOG_LEVEL, "warn", false, "error", "warn", "info", "debug");
         bool(DEVELOPER_INPUT_LOG, false, false);
@@ -160,15 +191,20 @@ public final class AndroidLocalSettings {
     }
 
     private static void bool(String key, boolean fallback, boolean synced) {
-        SPECS.put(key, new Spec(key, Spec.Kind.BOOLEAN, fallback, synced, null, 0, 0, 1));
+        SPECS.put(key, new Spec(key, Spec.Kind.BOOLEAN, fallback, synced, null, null, 0, 0, 1));
     }
 
     private static void choice(String key, String fallback, boolean synced, String... choices) {
-        SPECS.put(key, new Spec(key, Spec.Kind.CHOICE, fallback, synced, choices, 0, 0, 1));
+        SPECS.put(key, new Spec(key, Spec.Kind.CHOICE, fallback, synced, choices, null, 0, 0, 1));
+    }
+
+    private static void text(String key, String fallback, boolean synced,
+                             java.util.function.UnaryOperator<String> normalizer) {
+        SPECS.put(key, new Spec(key, Spec.Kind.TEXT, fallback, synced, null, normalizer, 0, 0, 1));
     }
 
     private static void integer(String key, int fallback, boolean synced, int min, int max, int step) {
-        SPECS.put(key, new Spec(key, Spec.Kind.INTEGER, fallback, synced, null, min, max, step));
+        SPECS.put(key, new Spec(key, Spec.Kind.INTEGER, fallback, synced, null, null, min, max, step));
     }
 
     /** 全部设置项，按声明顺序。 */
@@ -209,6 +245,11 @@ public final class AndroidLocalSettings {
         public int integer(String key) {
             requireKind(key, Spec.Kind.INTEGER);
             return (Integer) value(key);
+        }
+
+        public String text(String key) {
+            requireKind(key, Spec.Kind.TEXT);
+            return (String) value(key);
         }
 
         /** 显式写过的值，键名排序。 */

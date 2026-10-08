@@ -11,6 +11,7 @@ import android.view.View;
 import androidx.annotation.Nullable;
 import app.msime.android.BoundsPolicy;
 import app.msime.android.KeyboardSkin;
+import app.msime.android.ViewPolicy;
 
 /**
  * A still picture of the keyboard the user actually has.
@@ -25,10 +26,10 @@ import app.msime.android.KeyboardSkin;
  * their own skin was a card that contradicted itself.
  */
 public final class KeyboardPreview extends View {
-    /** 九键：左列符号，右列退格 / 拆分 / 0 / 回车；底行与设计一致。 */
+    /** 九键：左列符号，右列退格 / 重输 / 0 / 回车；底行与设计一致。 */
     private static final String[][] NINE_KEY_ROWS = {
         {"，", "@#", "ABC", "DEF", "⌫"},
-        {"。", "GHI", "JKL", "MNO", "拆分"},
+        {"。", "GHI", "JKL", "MNO", "重输"},
         {"？", "PQRS", "TUV", "WXYZ", "0"},
         {"123", "中", "，", "空格", "。", "↵"},
     };
@@ -41,7 +42,7 @@ public final class KeyboardPreview extends View {
     };
     /** 画成功能键底色的键面。 */
     private static final java.util.Set<String> FUNCTION_KEYS = java.util.Set.of(
-        "⇧", "⌫", "123", "中", "拆分", "@#", "，", "。", "？", "0");
+        "⇧", "⌫", "123", "中", "重输", "@#", "，", "。", "？", "0");
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF key = new RectF();
@@ -233,10 +234,10 @@ public final class KeyboardPreview extends View {
         // 候选条：一个拼音和两枚候选，首选用强调色。
         float baseline = pad + stripHeight * 0.68f;
         paint.setTextAlign(Paint.Align.LEFT);
-        paint.setTextSize(Ui.sp(getContext(), 12) * s);
+        ViewPolicy.setTextSizeSp(paint, getContext(), 12 * s);
         paint.setColor(secondary());
         canvas.drawText("ni hao", pad + Ui.dpFloat(getContext(), 6) * s, baseline, paint);
-        paint.setTextSize(Ui.sp(getContext(), 13) * s);
+        ViewPolicy.setTextSizeSp(paint, getContext(), 13 * s);
         paint.setColor(returnCap());
         canvas.drawText("你好", pad + Ui.dpFloat(getContext(), 52) * s, baseline, paint);
         paint.setColor(ink());

@@ -5,13 +5,14 @@ use std::sync::Arc;
 
 use super::syllable::{self, Inventory, Segmentation};
 use crate::error::Result;
-use crate::language_dictionary::LanguageDictionary;
+use crate::language_dictionary::{LanguageDictionary, LanguageEntry};
 use crate::types::{QueryRequest, SchemeKey, SchemeType};
 
 /// Entries read for one span of complete syllables.
 pub const SPAN_LIMIT: usize = 200;
 /// Entries read for a reading whose last syllable is still a prefix.
 pub const COMPLETION_LIMIT: usize = 50;
+const SMALL_CANDIDATE_DEDUP: usize = 64;
 
 /// One candidate row, with what selecting it consumes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,14 @@ pub struct CantoneseScheme {
     /// Lowercase letters and single `'` boundaries, never starting with one.
     input: String,
     inventory: Arc<Inventory>,
+}
+
+/// 会话查询复用的字典行和跨度键；不属于方案的组字状态。
+#[derive(Default)]
+pub(crate) struct CantoneseQueryBuffer {
+    entries: Vec<LanguageEntry>,
+    completions: Vec<(String, LanguageEntry)>,
+    key: String,
 }
 
 impl CantoneseScheme {
@@ -148,94 +157,106 @@ impl CantoneseScheme {
     /// 1. When the reading covers every letter, the entries of the whole reading, or when its last syllable is still a prefix, the entries that complete it. A last syllable that is complete but also starts a longer one (`ho` of `hou`) lists its exact entries and then the entries that complete it, so a word does not drop out of the list while its last syllable is half typed.
     /// 2. Then each leading span of complete syllables, longest first, each span's entries heaviest first.
     pub fn candidates(&self, dictionary: &LanguageDictionary) -> Result<Vec<CantoneseCandidate>> {
+        let mut candidates = Vec::new();
+        self.candidates_into(
+            dictionary,
+            &mut CantoneseQueryBuffer::default(),
+            &mut candidates,
+        )?;
+        candidates.shrink_to_fit();
+        Ok(candidates)
+    }
+
+    /// 将候选写入已有缓冲，并复用字典行和候选行中的字符串容量。
+    pub(crate) fn candidates_into(
+        &self,
+        dictionary: &LanguageDictionary,
+        buffer: &mut CantoneseQueryBuffer,
+        candidates: &mut Vec<CantoneseCandidate>,
+    ) -> Result<()> {
         let input = self.input.as_str();
         let reading = self.segmentation();
         let count = reading.syllables.len();
         let full = !reading.syllables.is_empty()
             && input[reading.end()..].bytes().all(|byte| byte == b'\'');
-        let mut candidates = Vec::new();
-        let push = |candidates: &mut Vec<CantoneseCandidate>,
-                    key: String,
-                    text: String,
-                    weight: i64,
-                    syllables: usize| {
-            candidates.push(CantoneseCandidate {
-                text,
-                weight,
-                key,
-                syllables,
-                end: reading.syllables[syllables - 1].end,
-            });
-        };
+        let mut length = 0;
         let mut spans = count;
         if full {
-            let whole = reading.key(input, count);
+            write_key(&reading, input, count, &mut buffer.key);
             if reading.ends_in_prefix() {
-                let completions = dictionary.lookup_completions(&whole, COMPLETION_LIMIT)?;
-                candidates.reserve_exact(completions.len());
-                for (key, entry) in completions {
-                    push(&mut candidates, key, entry.text, entry.weight, count);
-                }
-            } else {
-                let entries = dictionary.lookup(&whole, SPAN_LIMIT)?;
-                candidates.reserve_exact(entries.len());
-                for entry in entries {
-                    push(
-                        &mut candidates,
-                        whole.clone(),
-                        entry.text,
+                dictionary.lookup_completions_into(
+                    &buffer.key,
+                    COMPLETION_LIMIT,
+                    &mut buffer.completions,
+                )?;
+                reserve_candidate_batch(candidates, length, buffer.completions.len());
+                for (key, entry) in &buffer.completions {
+                    push_candidate(
+                        candidates,
+                        &mut length,
+                        key,
+                        &entry.text,
                         entry.weight,
                         count,
+                        &reading,
+                    );
+                }
+            } else {
+                dictionary.lookup_into(&buffer.key, SPAN_LIMIT, &mut buffer.entries)?;
+                reserve_candidate_batch(candidates, length, buffer.entries.len());
+                for entry in &buffer.entries {
+                    push_candidate(
+                        candidates,
+                        &mut length,
+                        &buffer.key,
+                        &entry.text,
+                        entry.weight,
+                        count,
+                        &reading,
                     );
                 }
                 let last = reading.texts(input).last().unwrap_or_default();
                 if self.inventory.is_prefix(last) {
-                    let completions = dictionary.lookup_completions(&whole, COMPLETION_LIMIT)?;
-                    candidates.reserve_exact(completions.len());
-                    for (key, entry) in completions {
-                        push(&mut candidates, key, entry.text, entry.weight, count);
+                    dictionary.lookup_completions_into(
+                        &buffer.key,
+                        COMPLETION_LIMIT,
+                        &mut buffer.completions,
+                    )?;
+                    reserve_candidate_batch(candidates, length, buffer.completions.len());
+                    for (key, entry) in &buffer.completions {
+                        push_candidate(
+                            candidates,
+                            &mut length,
+                            key,
+                            &entry.text,
+                            entry.weight,
+                            count,
+                            &reading,
+                        );
                     }
                 }
             }
             spans = count - 1;
         }
-        for length in (1..=spans).rev() {
-            let key = reading.key(input, length);
-            let entries = dictionary.lookup(&key, SPAN_LIMIT)?;
-            candidates.reserve_exact(entries.len());
-            for entry in entries {
-                push(
-                    &mut candidates,
-                    key.clone(),
-                    entry.text,
+        for span_length in (1..=spans).rev() {
+            write_key(&reading, input, span_length, &mut buffer.key);
+            dictionary.lookup_into(&buffer.key, SPAN_LIMIT, &mut buffer.entries)?;
+            reserve_candidate_batch(candidates, length, buffer.entries.len());
+            for entry in &buffer.entries {
+                push_candidate(
+                    candidates,
+                    &mut length,
+                    &buffer.key,
+                    &entry.text,
                     entry.weight,
-                    length,
+                    span_length,
+                    &reading,
                 );
             }
         }
-        let mut seen = HashSet::with_capacity(candidates.len());
-        let duplicates = candidates
-            .iter()
-            .enumerate()
-            .filter_map(|(index, candidate)| {
-                (!seen.insert((candidate.text.as_str(), candidate.syllables))).then_some(index)
-            })
-            .collect::<Vec<_>>();
-        drop(seen);
-        let mut duplicates = duplicates.into_iter().peekable();
-        let mut write = 0;
-        for read in 0..candidates.len() {
-            if duplicates.peek() == Some(&read) {
-                duplicates.next();
-                continue;
-            }
-            if write != read {
-                candidates.swap(write, read);
-            }
-            write += 1;
-        }
-        candidates.truncate(write);
-        Ok(candidates)
+        candidates.truncate(length);
+        deduplicate_candidates(candidates);
+        Ok(())
     }
 
     /// Takes the letters `candidate` covers out of the composition, with the boundary after them. Returns whether letters are left composing; the caller commits the candidate's text either way.
@@ -245,6 +266,95 @@ impl CantoneseScheme {
         self.input.drain(..boundaries);
         !self.input.is_empty()
     }
+}
+
+fn reserve_candidate_batch(candidates: &mut Vec<CantoneseCandidate>, length: usize, batch: usize) {
+    let required = length + batch;
+    if required > candidates.capacity() {
+        candidates.reserve_exact(required - candidates.len());
+    }
+}
+
+fn push_candidate(
+    candidates: &mut Vec<CantoneseCandidate>,
+    length: &mut usize,
+    key: &str,
+    text: &str,
+    weight: i64,
+    syllables: usize,
+    reading: &Segmentation,
+) {
+    let end = reading.syllables[syllables - 1].end;
+    if let Some(candidate) = candidates.get_mut(*length) {
+        candidate.text.clear();
+        candidate.text.push_str(text);
+        candidate.key.clear();
+        candidate.key.push_str(key);
+        candidate.weight = weight;
+        candidate.syllables = syllables;
+        candidate.end = end;
+    } else {
+        candidates.push(CantoneseCandidate {
+            text: text.to_owned(),
+            weight,
+            key: key.to_owned(),
+            syllables,
+            end,
+        });
+    }
+    *length += 1;
+}
+
+fn write_key(reading: &Segmentation, input: &str, count: usize, destination: &mut String) {
+    destination.clear();
+    for (index, syllable) in reading.syllables.iter().take(count).enumerate() {
+        if index > 0 {
+            destination.push(' ');
+        }
+        destination.push_str(&input[syllable.start..syllable.end]);
+    }
+}
+
+fn deduplicate_candidates(candidates: &mut Vec<CantoneseCandidate>) {
+    if candidates.len() <= SMALL_CANDIDATE_DEDUP {
+        let mut write = 0;
+        for read in 0..candidates.len() {
+            if candidates[..write].iter().any(|existing| {
+                existing.text == candidates[read].text
+                    && existing.syllables == candidates[read].syllables
+            }) {
+                continue;
+            }
+            if write != read {
+                candidates.swap(write, read);
+            }
+            write += 1;
+        }
+        candidates.truncate(write);
+        return;
+    }
+    let mut seen = HashSet::with_capacity(candidates.len());
+    let duplicates = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            (!seen.insert((candidate.text.as_str(), candidate.syllables))).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    drop(seen);
+    let mut duplicates = duplicates.into_iter().peekable();
+    let mut write = 0;
+    for read in 0..candidates.len() {
+        if duplicates.peek() == Some(&read) {
+            duplicates.next();
+            continue;
+        }
+        if write != read {
+            candidates.swap(write, read);
+        }
+        write += 1;
+    }
+    candidates.truncate(write);
 }
 
 #[cfg(test)]
@@ -348,6 +458,45 @@ mod tests {
             .collect()
     }
 
+    fn candidate(text: &str, syllables: usize) -> CantoneseCandidate {
+        CantoneseCandidate {
+            text: text.to_owned(),
+            weight: 1,
+            key: "nei".to_owned(),
+            syllables,
+            end: 3,
+        }
+    }
+
+    #[test]
+    fn short_candidate_dedup_keeps_first_rows_without_temporary_heap_state() {
+        let mut candidates = vec![
+            candidate("你", 1),
+            candidate("妳", 1),
+            candidate("你", 1),
+            candidate("你", 2),
+        ];
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            deduplicate_candidates(&mut candidates);
+        });
+        assert_eq!(allocations, 0);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.text.as_str(), candidate.syllables))
+                .collect::<Vec<_>>(),
+            [("你", 1), ("妳", 1), ("你", 2)]
+        );
+
+        let mut large = (0..=SMALL_CANDIDATE_DEDUP)
+            .map(|index| candidate(&format!("字{index}"), 1))
+            .collect::<Vec<_>>();
+        large.push(candidate("字0", 1));
+        deduplicate_candidates(&mut large);
+        assert_eq!(large.len(), SMALL_CANDIDATE_DEDUP + 1);
+        assert_eq!(large[0].text, "字0");
+    }
+
     #[test]
     fn the_whole_reading_comes_first_then_leading_spans() {
         let fixture = fixture();
@@ -386,6 +535,38 @@ mod tests {
         let candidates = typed("neih").candidates(&dictionary).unwrap();
         assert_eq!(candidates.len(), 23);
         assert_eq!(candidates.capacity(), candidates.len());
+    }
+
+    #[test]
+    fn candidates_into_reuses_candidate_rows_on_requery() {
+        let fixture = fixture();
+        let scheme = typed("neihou");
+        let mut buffer = CantoneseQueryBuffer::default();
+        let mut candidates = Vec::new();
+        scheme
+            .candidates_into(&fixture.dictionary, &mut buffer, &mut candidates)
+            .unwrap();
+        let pointers = candidates
+            .iter()
+            .map(|candidate| (candidate.text.as_ptr(), candidate.key.as_ptr()))
+            .collect::<Vec<_>>();
+
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            scheme
+                .candidates_into(&fixture.dictionary, &mut buffer, &mut candidates)
+                .unwrap();
+        });
+        assert!(
+            allocations <= 8,
+            "重复查询只应保留分段所需的少量分配：{allocations}"
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.text.as_ptr(), candidate.key.as_ptr()))
+                .collect::<Vec<_>>(),
+            pointers
+        );
     }
 
     #[test]

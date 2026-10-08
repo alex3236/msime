@@ -68,15 +68,15 @@ final class ImeCandidates {
             },
             chip(selectedBackground, 9), pressed, focused, hovered,
             chip(android.graphics.Color.TRANSPARENT, 9));
-        button.setBackground(states);
-        button.setTextColor(ColorPolicy.stateList(
+        ViewPolicy.setBackground(button, states);
+        ViewPolicy.setTextColor(button, ColorPolicy.stateList(
             new int[][] {{android.R.attr.state_selected}, {}},
             new int[] {selectedText, keyForeground}));
         applyCandidateTypeface(button);
         ViewPolicy.setMinimumWidth(button, s.pixels(30));
         ViewPolicy.clearMinimumHeight(button);
         KeyboardGeometry.setHorizontalPaddingDp(button, s, 11);
-        button.setLineSpacing(0, 1.0f);
+        ViewPolicy.setLineSpacing(button, 0, 1.0f);
         ViewPolicy.clearFontPadding(button);
         ViewPolicy.clearElevation(button);
     }
@@ -97,8 +97,8 @@ final class ImeCandidates {
                 {android.R.attr.state_selected}, {android.R.attr.state_pressed}, new int[0]
             },
             chip(accentSoft, 8), chip(s.candidateAppearance.hover(), 8), chip(keyBackground, 8));
-        button.setBackground(states);
-        button.setTextColor(ColorPolicy.stateList(
+        ViewPolicy.setBackground(button, states);
+        ViewPolicy.setTextColor(button, ColorPolicy.stateList(
             new int[][] {{android.R.attr.state_selected}, {}},
             new int[] {accentText, keyForeground}));
         applyCandidateTypeface(button);
@@ -115,7 +115,7 @@ final class ImeCandidates {
         if (!s.candidateGlossInsertionEnabled() && !s.candidateManagementEnabled()) return false;
         PopupMenu popup = new PopupMenu(s, button);
         String translation = candidate == null || candidate.isNull("translation")
-            ? "" : candidate.optString("translation", "");
+            ? "" : JsonPolicy.strictStringOrEmpty(candidate.opt("translation"));
         java.util.List<String> glosses = s.candidateGlossInsertionEnabled()
             ? CandidateTranslationPolicy.insertionGlosses(translation) : java.util.List.of();
         for (int index = 0; index < glosses.size(); index++)
@@ -157,7 +157,7 @@ final class ImeCandidates {
         // HorizontalScrollView cancels the child on a drag, so the button keeps immediate tap
         // feedback without changing the existing scroll-versus-select boundary.
         Button button = candidateButton();
-        button.setOnClickListener(ignored -> s.selectVisibleCandidate(button, slot));
+        ViewPolicy.bindClick(button, () -> s.selectVisibleCandidate(button, slot));
         button.setOnLongClickListener(ignored -> {
             JSONObject current = s.visibleCandidate(slot);
             JSONObject id = current == null ? null : current.optJSONObject("id");
@@ -196,7 +196,7 @@ final class ImeCandidates {
         if (id == null || index < 0) {
             ViewPolicy.setEnabled(button, false);
         } else {
-            button.setOnClickListener(ignored -> {
+            ViewPolicy.bindClick(button, () -> {
                 s.imeKeyFeedback.playFeedback(button);
                 if (s.session == 0
                         || CandidateGlossPolicy.strictOr(id.opt("session"), Long.MIN_VALUE)
@@ -224,7 +224,7 @@ final class ImeCandidates {
         ViewPolicy.setTextSizeLabel(button, label, sizeSp);
         KeyboardGeometry.setKeyTextSize(button, sizeSp);
         button.setContentDescription(description);
-        button.setOnClickListener(ignored -> {
+        ViewPolicy.bindClick(button, () -> {
             s.imeKeyFeedback.playFeedback(button);
             action.run();
         });
@@ -246,17 +246,27 @@ final class ImeCandidates {
                 ViewPolicy.hide(s.expandedCandidates);
                 ViewPolicy.hide(s.expandedCandidateScroll);
             }
+            // 选了候选等路径只把 candidatePanelOpen 置为 false，九键三栏面板在这里跟着收起并清掉筛选。
+            s.imeNineKeyPanel.dismiss();
             return;
         }
+        // 全拼九键的三栏面板：选拼音、⌫、筛选换了一代候选时不收起，重新取完整候选再画；组字结束时 eligible 为假，落到下面按代次收起。
+        if (s.imeNineKeyPanel.eligible() && s.imeNineKeyPanel.refreshSnapshot()) {
+            if (s.expandedCandidates.getVisibility() != View.GONE) {
+                s.expandedCandidates.removeAllViews();
+                ViewPolicy.hide(s.expandedCandidates);
+                ViewPolicy.hide(s.expandedCandidateScroll);
+            }
+            s.imeNineKeyPanel.render();
+            return;
+        }
+        s.imeNineKeyPanel.dismiss();
         s.expandedCandidates.removeAllViews();
         if (s.view == null || s.candidatePanelSnapshot == null
                 || CandidateGlossPolicy.strictOr(s.candidatePanelSnapshot.opt("session"), Long.MIN_VALUE)
                     != s.session
                 || !MSIMEInputService.sameCandidateVersion(s.candidatePanelSnapshot, s.view)) {
-            s.candidatePanelOpen = false;
-            s.candidatePanelSnapshot = null;
-            ViewPolicy.hide(s.expandedCandidates);
-            ViewPolicy.hide(s.expandedCandidateScroll);
+            s.closeCandidatePanel();
             return;
         }
         ViewPolicy.show(s.expandedCandidateScroll);

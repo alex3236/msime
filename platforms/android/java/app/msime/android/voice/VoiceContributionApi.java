@@ -74,12 +74,11 @@ public final class VoiceContributionApi {
             CloudApi.Part.json("payload", payload),
             CloudApi.Part.file("audio", "voice.wav", "audio/wav", contribution.wav())),
             CloudApi.Auth.ANONYMOUS);
-        String id = strictString(response.opt("id"));
-        return id == null ? "" : id;
+        return JsonPolicy.strictStringOrEmpty(response.opt("id"));
     }
 
     /** org.json's optString coerces numbers; contribution identifiers must stay JSON strings. */
     static String strictString(Object value) {
-        return value instanceof String ? (String) value : null;
+        return JsonPolicy.strictString(value);
     }
 }

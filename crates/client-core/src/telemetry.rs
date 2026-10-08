@@ -30,7 +30,7 @@ pub const STATE_FILE: &str = "telemetry-state.json";
 pub const SESSION_FILE: &str = "telemetry-session.json";
 /// Crash records, one `<session id>.crash` file per crashed session.
 pub const CRASH_DIRECTORY: &str = "telemetry-crashes";
-const CRASH_EXTENSION: &str = "crash";
+pub(crate) const CRASH_EXTENSION: &str = "crash";
 const LOCK_FILE: &str = "telemetry.lock";
 
 /// Most events kept for delivery; the oldest are dropped first.
@@ -53,7 +53,7 @@ const EVENTS_PATH: &str = "/v1/telemetry/events";
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_QUEUE_BYTES: u64 = 1 << 20;
 const MAX_SMALL_FILE_BYTES: u64 = 16 * 1024;
-const MAX_CRASH_RECORD_BYTES: u64 = 64 * 1024;
+pub(crate) const MAX_CRASH_RECORD_BYTES: u64 = 64 * 1024;
 /// Crash records turned into events per start; a host that crashes in a loop cannot fill the queue with one start's worth of records.
 const MAX_CRASH_RECORDS_PER_START: usize = 8;
 /// A `Retry-After` beyond this is treated as this, so a malformed header cannot silence reporting for good.
@@ -613,13 +613,22 @@ impl TelemetryStore {
 
     fn write_json(&self, name: &str, value: &impl Serialize) -> Result<(), TelemetryError> {
         let bytes = serde_json::to_vec(value).map_err(|_| TelemetryError::Storage)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-        temporary.write_all(&bytes)?;
-        temporary.as_file().sync_all()?;
-        temporary
-            .persist(self.directory.join(name))
-            .map_err(|_| TelemetryError::Storage)?;
-        Ok(())
+        #[cfg(unix)]
+        {
+            let directory = crate::storage::open_private_directory(&self.directory)?;
+            crate::storage::write_private_file_at(&directory, std::ffi::OsStr::new(name), &bytes)?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
+            temporary.write_all(&bytes)?;
+            temporary.as_file().sync_all()?;
+            temporary
+                .persist(self.directory.join(name))
+                .map_err(|_| TelemetryError::Storage)?;
+            Ok(())
+        }
     }
 
     fn ingest_crash_records(
@@ -790,14 +799,11 @@ fn is_regular_file(path: &Path) -> bool {
 }
 
 fn open_regular_file(path: &Path) -> Option<File> {
-    if !is_regular_file(path) {
-        return None;
-    }
-    crate::storage::open_private_file(path).ok()
+    crate::storage::open_private_file_in(path).ok()
 }
 
 fn remove_file(path: &Path) -> Result<(), TelemetryError> {
-    match fs::remove_file(path) {
+    match crate::storage::remove_private_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),

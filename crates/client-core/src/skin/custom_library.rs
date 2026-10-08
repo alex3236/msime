@@ -4,7 +4,8 @@ use crate::file_lock;
 use crate::preferences::TouchKeyboardSkinDesign;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{self, File};
+use std::fs::File;
+#[cfg(not(unix))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -78,11 +79,6 @@ impl CustomSkinLibraryStore {
     }
 
     pub fn load(&self) -> Result<Vec<SavedTouchKeyboardSkin>, CustomSkinLibraryError> {
-        match fs::symlink_metadata(self.path()) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
-        }
         let _lock = self.lock()?;
         self.read_locked()
     }
@@ -177,20 +173,17 @@ impl CustomSkinLibraryStore {
     }
 
     fn read_locked(&self) -> Result<Vec<SavedTouchKeyboardSkin>, CustomSkinLibraryError> {
-        let path = self.path();
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
+        let file = match crate::storage::open_private_file_in(&self.path()) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(error.into()),
+            Err(_) => return Err(CustomSkinLibraryError::Invalid),
         };
-        if !metadata.file_type().is_file() || metadata.len() > MAXIMUM_BYTES {
+        if file.metadata()?.len() > MAXIMUM_BYTES {
             return Err(CustomSkinLibraryError::Invalid);
         }
-        let bytes = crate::bounded_io::read_bounded_file(
-            crate::storage::open_private_file(&path)?,
-            MAXIMUM_BYTES,
-            || CustomSkinLibraryError::Invalid,
-        )?;
+        let bytes = crate::bounded_io::read_bounded_file(file, MAXIMUM_BYTES, || {
+            CustomSkinLibraryError::Invalid
+        })?;
         let mut items: Vec<SavedTouchKeyboardSkin> = serde_json::from_slice(&bytes)?;
         if items.len() > MAXIMUM_ITEMS {
             return Err(CustomSkinLibraryError::Invalid);
@@ -215,13 +208,26 @@ impl CustomSkinLibraryStore {
         if bytes.len() as u64 > MAXIMUM_BYTES {
             return Err(CustomSkinLibraryError::Invalid);
         }
-        let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-        temporary.write_all(&bytes)?;
-        temporary.as_file().sync_all()?;
-        temporary
-            .persist(self.path())
-            .map_err(|error| error.error)?;
-        Ok(())
+        #[cfg(unix)]
+        {
+            let directory = crate::storage::open_private_directory(&self.directory)?;
+            crate::storage::write_private_file_at(
+                &directory,
+                std::ffi::OsStr::new("library.json"),
+                &bytes,
+            )?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        {
+            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
+            temporary.write_all(&bytes)?;
+            temporary.as_file().sync_all()?;
+            temporary
+                .persist(self.path())
+                .map_err(|error| error.error)?;
+            Ok(())
+        }
     }
 }
 
@@ -276,6 +282,7 @@ fn unique_import_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn create(name: &str, design: TouchKeyboardSkinDesign) -> CustomSkinLibraryAction {
         CustomSkinLibraryAction::Create {
@@ -446,6 +453,19 @@ mod tests {
         std::os::unix::fs::symlink(root.path().join("missing-library.json"), store.path()).unwrap();
 
         assert!(matches!(store.load(), Err(CustomSkinLibraryError::Invalid)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_a_symlinked_library_directory_before_reporting_empty() {
+        use msime_path_trust::untrusted_symlink as symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let store = CustomSkinLibraryStore::new(root.path());
+        symlink(outside.path(), store.path().parent().unwrap()).unwrap();
+
+        assert!(matches!(store.load(), Err(CustomSkinLibraryError::Io(_))));
     }
 
     #[test]

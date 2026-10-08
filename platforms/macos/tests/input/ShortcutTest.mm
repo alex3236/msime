@@ -5899,6 +5899,11 @@ static void TestApplyCandidateTranslationSnapshotsAreReused() {
 - (NSDictionary *)applyTranslations:(NSArray *)translations generation:(uint64_t)generation error:(NSError **)error {
     (void)error;
     assert(NSThread.isMainThread && generation == self.generation);
+    // 和真实会话（msime_client_apply_translations）一样：任何一条释义带控制字符（Unicode Cc，"\n" 也算）就整批拒收，什么也不交付。
+    NSMutableCharacterSet *controls = [NSMutableCharacterSet characterSetWithRange:NSMakeRange(0, 0x20)];
+    [controls addCharactersInRange:NSMakeRange(0x7F, 0x21)];
+    for (NSDictionary *entry in translations)
+        if ([entry[@"translation"] rangeOfCharacterFromSet:controls].location != NSNotFound) return nil;
     [self.appliedGenerations addObject:@(generation)];
     self.delivered = translations;
     return @{@"applied":@YES, @"view":[self viewWithError:nil]};
@@ -6109,6 +6114,39 @@ static void TestAiCandidateCacheAcrossGenerations() {
     [controller setValue:@{ @"candidates": @[@{ @"text": @"普通候选", @"source": @0 }] } forKey:@"view"];
     [controller synchronizeAITranslations];
     assert(session.applications == 2 && session.descriptorRequests == 1 && controller.aiBatches.count == 1);
+    [controller cancelAITranslations];
+}
+
+static void TestAiCandidateCacheTracksProviderSettings() {
+    AIShortcutController *controller = [AIShortcutController alloc];
+    controller.aiBatches = [NSMutableArray array];
+    AIShortcutSession *session = [AIShortcutSession new];
+    session.query = @{ @"scheme": @0, @"generation": @1, @"identity": @"synthetic-ai-settings",
+        @"query_text": @"nihao", @"cache_key": @"nihao-settings", @"pinyin_segments": @[@"ni", @"hao"],
+        @"ai_context": @"设置缓存", @"cloud_eligible": @NO, @"ai_eligible": @YES,
+        @"cloud_candidates": @YES, @"ai_assistant": @{ @"enabled": @YES, @"provider": @"openai",
+            @"endpoint": @"https://synthetic.invalid/chat", @"model": @"synthetic",
+            @"candidate_limit": @3, @"prompt_custom_1": @"旧提示" }, @"session_id": @1 };
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:[ShortcutClient new] forKey:@"activeClient"];
+    [controller synchronizeAITranslations];
+    NSTimer *timer = [controller valueForKey:@"aiTimer"];
+    [timer fire];
+    controller.aiBatches[0].reply(@[@{ @"translation": @"缓存候选" }]);
+    assert(session.applications == 1 && session.descriptorRequests == 1);
+
+    NSMutableDictionary *next = [session.query mutableCopy];
+    next[@"generation"] = @([next[@"generation"] unsignedLongLongValue] + 1);
+    next[@"ai_assistant"] = @{ @"enabled": @YES, @"provider": @"openai",
+        @"endpoint": @"https://synthetic.invalid/chat", @"model": @"synthetic",
+        @"candidate_limit": @5, @"prompt_custom_1": @"新提示" };
+    session.query = next;
+    [controller setValue:@{ @"candidates": @[@{ @"text": @"普通候选", @"source": @0 }] } forKey:@"view"];
+    [controller synchronizeAITranslations];
+    timer = [controller valueForKey:@"aiTimer"];
+    assert(timer && controller.aiBatches.count == 1);
+    [timer fire];
+    assert(controller.aiBatches.count == 2 && session.descriptorRequests == 2);
     [controller cancelAITranslations];
 }
 
@@ -6733,7 +6771,7 @@ static void TestAccountGlossWaitsForDictionary() {
         object:nil userInfo:@{@"generation":@2, @"target":@"ja", @"translations":@{@"你好":@"こんにちは"}}]];
     NSDictionary *greeting = nil;
     for (NSDictionary *entry in session.delivered) if ([entry[@"text"] isEqual:@"你好"]) greeting = entry;
-    assert([greeting[@"translation"] isEqual:@"hello\nこんにちは"]);
+    assert([greeting[@"translation"] isEqual:@"hello\u2028こんにちは"]);
     // Once the Japanese dictionary answers it too, it is left out, while a word that dictionary answered only in Japanese goes out for its English row.
     session.generation++; session.offlineGlossLanguages = @[@"ja"];
     session.page = @[@{@"text":@"你好", @"source":@0}, @{@"text":@"测试", @"source":@0}];
@@ -6901,10 +6939,10 @@ static void TestOfflineTargetGlosses() {
     // Only the selected targets are read: ja is installed but not chosen. Rows follow the target order, and a candidate the English dictionary cannot answer keeps an empty first row.
     settle();
     assert(([[controller currentTargetGlossRequest][@"offline_languages"] isEqual:@[@"fr"]]));
-    assert(([session.delivered isEqual:@[@{@"text":@"Hello", @"translation":@"本地释义"}, @{@"text":@"测试", @"translation":@"\nessai"}]]));
+    assert(([session.delivered isEqual:@[@{@"text":@"Hello", @"translation":@"本地释义"}, @{@"text":@"测试", @"translation":@"\u2028essai"}]]));
     session.generation++; session.targetLanguage = @"ja"; session.targetLanguages = @[@"ja", @"en"];
     settle();
-    assert(([session.delivered isEqual:@[@{@"text":@"Hello", @"translation":@"\n本地释义"}, @{@"text":@"测试", @"translation":@"テスト"},
+    assert(([session.delivered isEqual:@[@{@"text":@"Hello", @"translation":@"\u2028本地释义"}, @{@"text":@"测试", @"translation":@"テスト"},
         @{@"text":@"你好", @"translation":@"こんにちは"}]]));
     // Without English among the targets the offline dictionary is the only local source.
     session.generation++; session.targetLanguage = @"fr"; session.targetLanguages = @[@"fr"];
@@ -6991,7 +7029,7 @@ static void TestOnDeviceGlosses() {
            ([controller.onDeviceFetches[3] isEqual:@[@[@"测试"], @[@"de"]]]));
     // A model answer over several lines is formatted to one, so it stays on the second target's row instead of opening a third.
     reply(@"de", @{@"测试":@"Test\nfoo "});
-    assert(([session.delivered isEqual:@[@{@"text":@"Hello", @"translation":@"本地释义"}, @{@"text":@"测试", @"translation":@"\nTest foo"}]]));
+    assert(([session.delivered isEqual:@[@{@"text":@"Hello", @"translation":@"本地释义"}, @{@"text":@"测试", @"translation":@"\u2028Test foo"}]]));
     // A Chinese word the English dictionary answers keeps its place in the page but is not sent to the model for English, which spends half a second on every word it is given.
     controller.extraEnglishGlosses = @{@"你好":@"hello"};
     session.generation++; session.targetLanguages = @[@"en"];
@@ -7259,6 +7297,26 @@ static void TestCustomTranslationController() {
     [prefs.window close];
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
+// #5598：设了第二释义语言后，每个候选的两行释义要经过会话再读回来。会话拒收 "\n"，所以交给它时行之间用 U+2028 连接，读回时拆回原来的行；来源自带的 U+2028、U+2029 折成空格，不额外占一行。
+static void TestGlossLinesSurviveSession() {
+    NSArray<NSDictionary *> *encoded = MSIMESessionTranslations(@[
+        @{@"text":@"国家", @"translation":@"country; state\n国家の"},
+        @{@"text":@"你好", @"translation":@"\nこんにちは"},
+        @{@"text":@"测试", @"translation":@"te\u2028st\u2029x\nテスト"},
+        @{@"text":@"hello", @"translation":@"你好"}]);
+    NSCharacterSet *controls = [NSCharacterSet characterSetWithRange:NSMakeRange(0, 0x20)];
+    for (NSDictionary *entry in encoded) assert([entry[@"translation"] rangeOfCharacterFromSet:controls].location == NSNotFound);
+    assert([encoded[0][@"translation"] isEqual:@"country; state\u2028国家の"]);
+    assert(([encoded[0][@"text"] isEqual:@"国家"] && [encoded[3] isEqual:@{@"text":@"hello", @"translation":@"你好"}]));
+    assert([CandidateTranslation(encoded[0]) isEqual:@"country; state\n国家の"]);
+    assert([MSIMECandidateTranslationColumn(encoded[0], 1) isEqual:@"country; state"]);
+    assert([MSIMECandidateTranslationColumn(encoded[0], 2) isEqual:@"国家の"]);
+    assert([MSIMECandidateTranslationColumn(encoded[1], 1) isEqual:@""]);
+    assert([MSIMECandidateTranslationColumn(encoded[1], 2) isEqual:@"こんにちは"]);
+    assert([CandidateTranslation(encoded[2]) isEqual:@"te st x\nテスト"]);
+    assert([MSIMECandidateTranslationColumn(encoded[2], 2) isEqual:@"テスト"]);
+    assert([CandidateTranslation(encoded[3]) isEqual:@"你好"]);
+}
 static void TestSecondaryTranslationScheduling() {
     [[MSIMETranslationCache sharedCache] clear];
     CustomTranslationController *controller = [CustomTranslationController alloc];
@@ -7277,15 +7335,15 @@ static void TestSecondaryTranslationScheduling() {
     assert([controller.batches[1].items[0][@"request"][@"body"][@"target_lang"] isEqual:@"JA"]);
     controller.batches[0].reply(@[@{@"text":@"你好", @"translation":@"bonjour"}]);
     controller.batches[1].reply(@[@{@"text":@"你好", @"translation":@"こんにちは"}]);
-    assert(([session.delivered isEqual:@[@{@"text":@"你好", @"translation":@"bonjour\nこんにちは"}]]));
+    assert(([session.delivered isEqual:@[@{@"text":@"你好", @"translation":@"bonjour\u2028こんにちは"}]]));
     session.generation++;
     [controller synchronizeCustomTranslations];
-    assert(controller.batches.count == 2 && [session.delivered[0][@"translation"] isEqual:@"bonjour\nこんにちは"]);
+    assert(controller.batches.count == 2 && [session.delivered[0][@"translation"] isEqual:@"bonjour\u2028こんにちは"]);
     session.generation++;
     session.targetLanguage = @"ja";
     session.targetLanguages = @[@"ja", @"fr"];
     [controller synchronizeCustomTranslations];
-    assert(controller.batches.count == 2 && [session.delivered[0][@"translation"] isEqual:@"こんにちは\nbonjour"]);
+    assert(controller.batches.count == 2 && [session.delivered[0][@"translation"] isEqual:@"こんにちは\u2028bonjour"]);
     [[MSIMETranslationCache sharedCache] clear];
     session.generation++;
     session.targetLanguage = @"fr";
@@ -7817,6 +7875,7 @@ int main(int argc, char **argv) {
             @autoreleasepool { TestOnDeviceGlossPersistence(); }
             @autoreleasepool { TestOnDeviceGlossDuplicateTextKeepsRequestMetadata(); }
             @autoreleasepool { TestCustomTranslationController(); }
+            @autoreleasepool { TestGlossLinesSurviveSession(); }
             @autoreleasepool { TestSecondaryTranslationScheduling(); }
             @autoreleasepool { TestCustomTranslationCacheDelivery(); }
             @autoreleasepool { TestCustomTranslationIdleDelay(NO); }
@@ -7839,6 +7898,7 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestAiCandidatesIgnoreGlossSwitch(); }
         @autoreleasepool { TestAiCandidateRetryAfterRejectedResponse(); }
         @autoreleasepool { TestAiCandidateCacheAcrossGenerations(); }
+        @autoreleasepool { TestAiCandidateCacheTracksProviderSettings(); }
         @autoreleasepool { TestAiCandidateDescriptorFailureIsRetryable(); }
         @autoreleasepool { TestAiCandidateEngineDelivery(); }
         @autoreleasepool { TestCloudCandidatePreference(); }
@@ -7856,6 +7916,7 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestOnDeviceGlossPersistence(); }
         @autoreleasepool { TestOnDeviceGlossDuplicateTextKeepsRequestMetadata(); }
         @autoreleasepool { TestCustomTranslationController(); }
+        @autoreleasepool { TestGlossLinesSurviveSession(); }
         @autoreleasepool { TestSecondaryTranslationScheduling(); }
         @autoreleasepool { TestCustomTranslationCacheDelivery(); }
         @autoreleasepool { TestCustomTranslationIdleDelay(NO); }

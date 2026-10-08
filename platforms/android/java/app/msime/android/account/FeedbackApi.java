@@ -135,12 +135,12 @@ public final class FeedbackApi {
                 shot.contentType(), shot.bytes()));
         }
         JSONObject response = api.multipart(PATH, parts, CloudApi.Auth.ACCOUNT_OR_ANONYMOUS);
-        String id = strictString(response.opt("id"));
-        return id == null ? "" : id;
+        return JsonPolicy.strictStringOrEmpty(response.opt("id"));
     }
 
-    /** org.json's optString coerces numbers; response identifiers must keep their JSON type. */
+    /** Compatibility entry point retained for the host smoke contract. */
     static String strictString(Object value) {
-        return value instanceof String ? (String) value : null;
+        return JsonPolicy.strictString(value);
     }
+
 }

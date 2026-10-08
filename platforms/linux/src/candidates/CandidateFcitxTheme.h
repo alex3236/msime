@@ -1,11 +1,14 @@
 #pragma once
 
+#include <array>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -13,7 +16,9 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <system_error>
+#include <unistd.h>
 #include <vector>
 
 #include "CandidateColors.h"
@@ -303,13 +308,15 @@ inline FcitxThemeFiles fcitx_candidate_theme_files(const CandidateColors &colors
     decoration.pop_back();
   }
   std::ostringstream conf;
-  conf << "SupportedScale=2\n\n"
-          "[Metadata]\n"
+  // 文件必须以分组开头，不能有任何顶层键。在 GNOME Wayland 这类不让输入法自己弹窗的桌面上，候选窗由程序里的 fcitx5-gtk 模块按同一个主题绘制（客户端输入面板），它用 GKeyFile 读 theme.conf，遇到顶层键会整份拒绝并退回 default 主题，颜色和装饰图就都没了。所以经典界面加载 @2x 图要的 SupportedScale 不写成顶层的 `SupportedScale=2`，而写成 `[SupportedScale]` 分组下的 `Value=2`：这是 Fcitx5 把它改成可选值之后（上游 fcitx/fcitx5#1695，5.1.23 之后的版本）的写法，GKeyFile 也能读。5.1.22 及更早的版本不认这个键，5.1.23 只认顶层写法，读不出这个分组时退回 1，都只是不加载 @2x 图。
+  conf << "[Metadata]\n"
           "Name=MSIME\n"
           "Version=1\n"
           "Author=MSIME\n"
           "Description=Generated from the MSIME candidate settings; edits are replaced when they change\n"
           "ScaleWithDPI=True\n\n"
+          "[SupportedScale]\n"
+          "Value=2\n\n"
           "[InputPanel]\n"
        << "NormalColor=" << fcitx_theme_color(text) << "\n"
        << "HighlightCandidateColor=" << fcitx_theme_color(selected_text) << "\n"
@@ -395,13 +402,22 @@ inline std::optional<std::filesystem::path> fcitx_theme_file(const char *xdg_dat
 
 // Replace the theme file atomically, leaving it untouched when it already holds the content. Returns whether the file now holds it.
 inline bool write_fcitx_theme(const std::filesystem::path &file, const std::string &content) {
-  {
-    std::ifstream current(file, std::ios::binary);
-    if (current) {
+  const int descriptor = ::open(file.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (descriptor >= 0) {
+    struct CloseOnExit {
+      int descriptor;
+      ~CloseOnExit() { ::close(descriptor); }
+    } close_on_exit{descriptor};
+    struct stat metadata {};
+    if (::fstat(descriptor, &metadata) == 0 && S_ISREG(metadata.st_mode)) {
       std::string existing(content.size() + 1, '\0');
-      current.read(existing.data(), static_cast<std::streamsize>(existing.size()));
-      const auto count = current.gcount();
-      if (count == static_cast<std::streamsize>(content.size()) &&
+      ssize_t count = 0;
+      for (;;) {
+        count = ::read(descriptor, existing.data(), existing.size());
+        if (count < 0 && errno == EINTR) continue;
+        break;
+      }
+      if (count >= 0 && count == static_cast<ssize_t>(content.size()) &&
           existing.compare(0, content.size(), content) == 0)
         return true;
     }
@@ -441,16 +457,29 @@ inline std::optional<FcitxThemeOverlay> stage_fcitx_overlay(const std::filesyste
   if (std::find(std::begin(kinds), std::end(kinds), extension) == std::end(kinds)) return std::nullopt;
   std::error_code error;
   if (!std::filesystem::is_regular_file(source, error)) return std::nullopt;
+  const int descriptor = ::open(source.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (descriptor < 0) return std::nullopt;
+  struct CloseOnExit {
+    int descriptor;
+    ~CloseOnExit() { ::close(descriptor); }
+  } close_on_exit{descriptor};
+  struct stat metadata {};
+  if (::fstat(descriptor, &metadata) != 0 || !S_ISREG(metadata.st_mode)) return std::nullopt;
   std::string bytes;
-  {
-    std::ifstream in(source, std::ios::binary);
-    if (!in) return std::nullopt;
-    std::vector<char> buffer(64 * 1024);
-    while (in && bytes.size() <= kFcitxOverlayMaxBytes) {
-      in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-      bytes.append(buffer.data(), static_cast<std::size_t>(in.gcount()));
+  bytes.reserve(std::min<std::uintmax_t>(metadata.st_size, kFcitxOverlayMaxBytes));
+  std::array<char, 64 * 1024> buffer{};
+  for (;;) {
+    const ssize_t count = ::read(descriptor, buffer.data(), buffer.size());
+    if (count > 0) {
+      const auto size = static_cast<std::size_t>(count);
+      if (size > kFcitxOverlayMaxBytes || bytes.size() > kFcitxOverlayMaxBytes - size)
+        return std::nullopt;
+      bytes.append(buffer.data(), size);
+      continue;
     }
-    if (in.bad()) return std::nullopt;
+    if (count == 0) break;
+    if (errno == EINTR) continue;
+    return std::nullopt;
   }
   if (bytes.empty() || bytes.size() > kFcitxOverlayMaxBytes) return std::nullopt;
   const int width = static_cast<int>(std::lround(decoration.width_dip));

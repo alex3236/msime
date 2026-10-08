@@ -39,6 +39,11 @@ pub enum Action {
     FixCandidatePosition(CandidateId, u8),
     ClearCandidatePosition(CandidateId),
     ChooseNineKeySpelling(NineKeySpellingId),
+    /// 九宫格候选的筛选：只留单字，以及首字笔顺的前缀（`hspnz`，空表示不按笔画）。没有九宫格组字时不处理。
+    SetNineKeyFilter {
+        single_character: bool,
+        strokes: String,
+    },
     /// 滑过字母键的一笔，用宿主自己的坐标。
     Glide {
         keyboard: Box<GlideKeyboard>,
@@ -379,6 +384,20 @@ impl Runtime<Session> {
         self.apply_online_candidates_snapshot(query, candidates, source, cloud_candidates, limit)
     }
 
+    /// Remove cached and visible rows for one online provider.
+    pub fn clear_online_candidates(&mut self, source: u8) -> Result<(), RuntimeError> {
+        if source > 1 {
+            return Err(RuntimeError::Engine(
+                "invalid online candidate source".into(),
+            ));
+        }
+        self.engine
+            .clear_online_candidates(source)
+            .map_err(|error| RuntimeError::Engine(error.to_string()))?;
+        self.advance()?;
+        self.refresh()
+    }
+
     fn apply_online_candidates_snapshot(
         &mut self,
         query: OnlineQuerySnapshot,
@@ -679,6 +698,8 @@ impl<E: InputEngine> Runtime<E> {
             nine_key: self.cached.nine_key,
             nine_key_spellings: self.cached.nine_key_spellings.clone(),
             nine_key_reading: self.cached.nine_key_reading.clone(),
+            nine_key_single_character: self.cached.nine_key_single_character,
+            nine_key_strokes: self.cached.nine_key_strokes.clone(),
             touch_keyboard_layout: self.touch_keyboard_layout,
             character_width: self.character_width,
             microsoft_shuangpin: self.cached.microsoft_shuangpin,
@@ -1511,6 +1532,8 @@ impl<E: InputEngine> Runtime<E> {
                     nine_key: false,
                     nine_key_spellings: Vec::new(),
                     nine_key_reading: String::new(),
+                    nine_key_single_character: false,
+                    nine_key_strokes: String::new(),
                     candidate_annotations: Vec::new(),
                     candidate_codes: Vec::new(),
                     candidate_sources: Vec::new(),
@@ -1905,6 +1928,10 @@ impl<E: InputEngine> Runtime<E> {
                 .engine
                 .clear_candidate_position(self.engine_index(id.index)),
             Action::ChooseNineKeySpelling(id) => self.engine.choose_nine_key_spelling(id.index),
+            Action::SetNineKeyFilter {
+                single_character,
+                ref strokes,
+            } => self.engine.set_nine_key_filter(single_character, strokes),
             Action::Glide {
                 ref keyboard,
                 ref points,

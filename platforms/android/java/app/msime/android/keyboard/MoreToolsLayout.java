@@ -79,9 +79,11 @@ public final class MoreToolsLayout {
             case "按键振动", "振动" -> "◌";
             case "振动强度" -> "↕";
             case "单手模式" -> "◧";
+            case "浮动键盘" -> "⧉";
             case "隐私模式" -> "⛉";
             case "反馈" -> "✉";
             case "关于" -> "ⓘ";
+            case "文本编辑" -> "⇄";
             default -> "⌨";
         };
     }

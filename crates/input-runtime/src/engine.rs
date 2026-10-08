@@ -57,6 +57,12 @@ pub trait InputEngine {
             "Engine cache reset is unsupported".into(),
         ))
     }
+    /// Remove cached rows for one online provider (host source 0 = cloud, 1 = AI).
+    fn clear_online_candidates(&mut self, _source: u8) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Engine(
+            "Online candidate clearing is unsupported".into(),
+        ))
+    }
     fn set_paired_punctuation_enabled(&mut self, _enabled: bool) -> Result<(), RuntimeError> {
         Ok(())
     }
@@ -103,6 +109,16 @@ pub trait InputEngine {
     fn choose_nine_key_spelling(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
         Err(RuntimeError::Engine(
             "Nine-key spelling selection is unsupported".into(),
+        ))
+    }
+    /// 九宫格候选只留单字、按笔顺前缀筛选；没有九宫格的引擎不支持。
+    fn set_nine_key_filter(
+        &mut self,
+        _single_character: bool,
+        _strokes: &str,
+    ) -> Result<EngineResult, RuntimeError> {
+        Err(RuntimeError::Engine(
+            "Nine-key candidate filters are unsupported".into(),
         ))
     }
     /// 滑行的一笔；没有滑行输入的引擎不处理。
@@ -237,6 +253,10 @@ impl InputEngine for Session {
         Session::reset_cache(self);
         Ok(())
     }
+    fn clear_online_candidates(&mut self, source: u8) -> Result<(), RuntimeError> {
+        Session::clear_online_candidates(self, source)
+            .map_err(|error| RuntimeError::Engine(error.to_string()))
+    }
     fn set_paired_punctuation_enabled(&mut self, enabled: bool) -> Result<(), RuntimeError> {
         Session::set_paired_punctuation_enabled(self, enabled)
             .map_err(|e| RuntimeError::Engine(e.to_string()))
@@ -280,6 +300,14 @@ impl InputEngine for Session {
     }
     fn choose_nine_key_spelling(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
         Session::choose_nine_key_spelling(self, index)
+            .map_err(|e| RuntimeError::Engine(e.to_string()))
+    }
+    fn set_nine_key_filter(
+        &mut self,
+        single_character: bool,
+        strokes: &str,
+    ) -> Result<EngineResult, RuntimeError> {
+        Session::set_nine_key_filter(self, single_character, strokes)
             .map_err(|e| RuntimeError::Engine(e.to_string()))
     }
     fn glide(
