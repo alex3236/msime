@@ -414,4 +414,19 @@ assert 'std::tuple{"stroke", "Scheme/Stroke", "笔画"}' in ibus_source
 assert 'property_name != "Scheme/Stroke"' in ibus_source
 assert 'property_name == "Scheme/Stroke" ? std::string("stroke")' in ibus_source
 
+# #5988：主题同步每 250 ms 跑一拍。经典界面的 getConfig() 每次都扫描并解析全部已装主题，所以每一拍只读落盘的 classicui.conf：状态页不调它，主题同步只在那把廉价的键变化后调一次，比较时不栅格化主题，写主题失败或不可接管也记下键；「重启输入法服务」清掉键作为重试入口。拍子本身仍要同步主题，否则在 fcitx5-configtool 里改回默认主题后不会恢复接管。
+def body(text, start, end):
+    begin = text.index(start)
+    return text[begin:text.index(end, begin + len(start))]
+publish = body(source, "  void publishCandidatePanelStatus() {", "\n  }\n")
+assert "getConfig" not in publish and "read_classicui_theme_selection()" in publish
+apply_theme = body(source, "  void applyCandidatePanelTheme(fcitx::AddonInstance *classicui,", "\n  }\n")
+assert apply_theme.count("getConfig()") == 1
+assert apply_theme.index("if (current_key == candidate_theme_key_) return;") < apply_theme.index("candidate_theme_key_ = std::move(current_key);") < apply_theme.index("getConfig()")
+assert "host::fcitx_candidate_theme(" not in apply_theme
+assert "set_classicui_config(*classicui, current, config);" in apply_theme
+assert "candidate_theme_key_.clear();" in body(source, "  void resetSessions() {", "\n  }\n")
+assert "syncCandidatePanelTheme();" in body(source, "  void refreshProviderSockets() {", "\n  }\n")
+assert 'fcitx::readAsIni(config, "conf/classicui.conf");' in source
+
 print("Fcitx5 addon metadata passed")
