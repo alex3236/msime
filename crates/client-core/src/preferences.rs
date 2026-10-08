@@ -791,6 +791,9 @@ pub struct Preferences {
     /// not render the native badge.
     #[serde(default = "enabled_by_default")]
     pub input_mode_hud: bool,
+    /// 候选窗和悬浮工具栏左端的水杉 logo。新装默认隐藏（见 `Default`）；已存文档缺这个字段时读成显示，升级沿用原来的样子。
+    #[serde(default = "enabled_by_default")]
+    pub show_app_logo: bool,
     pub scheme: InputScheme,
     /// Show the Wubi code suffix that remains after the typed prefix.
     #[serde(default = "enabled_by_default")]
@@ -836,6 +839,9 @@ pub struct Preferences {
     /// The Vietnamese input method and tone placement.
     #[serde(default)]
     pub vietnamese: VietnamesePreferences,
+    /// 只出单字：全拼、双拼、五笔和粤拼的候选只留单个汉字，选一个字后剩下的拼写接着组字。默认关闭。
+    #[serde(default)]
+    pub single_character_only: bool,
     pub candidate_page_size: u8,
     /// Linux IBus can release the number row to the application while a
     /// candidate list is visible. Other hosts preserve this preference even
@@ -1857,6 +1863,7 @@ impl Default for Preferences {
             diagnostic_log: DiagnosticLogPreferences::default(),
             candidate_follow_cursor: true,
             input_mode_hud: true,
+            show_app_logo: false,
             scheme: InputScheme::default(),
             wubi_code_hint: true,
             wubi_mixed_pinyin: false,
@@ -1873,6 +1880,7 @@ impl Default for Preferences {
             shuangpin_profile: ShuangpinProfile::default(),
             shuangpin_preedit_uses_raw: true,
             vietnamese: VietnamesePreferences::default(),
+            single_character_only: false,
             candidate_page_size: 6,
             number_row_selection: true,
             candidate_font_size: default_candidate_font_size(),
@@ -2727,7 +2735,7 @@ impl PreferencesStore {
             )));
         }
         let bytes = crate::bounded_io::read_bounded_file(
-            crate::storage::open_private_file(&path)?,
+            crate::storage::open_private_file_in(&path)?,
             MAX_DOCUMENT_BYTES,
             || PreferencesError::DocumentTooLarge,
         )?;
@@ -2884,7 +2892,7 @@ impl PreferencesStore {
             Err(failure) => failure,
         };
         let bytes = crate::bounded_io::read_bounded_file(
-            crate::storage::open_private_file(&self.path())?,
+            crate::storage::open_private_file_in(&self.path())?,
             MAX_DOCUMENT_BYTES,
             || PreferencesError::DocumentTooLarge,
         )?;
@@ -3034,11 +3042,27 @@ fn salvage_preferences(
 
 fn atomic_write(directory: &Path, path: &Path, contents: &[u8]) -> Result<(), PreferencesError> {
     sweep_stale_temporaries(directory);
-    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-    temporary.write_all(contents)?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    #[cfg(unix)]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let opened = crate::storage::open_private_directory(parent)?;
+        let name = path.file_name().ok_or_else(|| {
+            PreferencesError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "preferences path has no file name",
+            ))
+        })?;
+        crate::storage::write_private_file_at(&opened, name, contents)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        temporary.write_all(contents)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    }
 }
 
 /// How long a staged write has to sit before it is considered abandoned. A staged write takes

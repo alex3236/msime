@@ -21,6 +21,16 @@ public final class SyncApiSmoke {
         check(SyncApi.phraseRevision(42L) == 42L, "integer phrase revision");
         check(SyncApi.snapshotRevisionValue(42L) == 42L, "integer snapshot revision");
         check(SyncApi.changesRevision(42L, 7L) == 42L, "integer dictionary revision");
+        check(!SyncApi.changePageChanged(false, 7L, 7L), "stationary empty change page");
+        check(SyncApi.changePageChanged(true, 8L, 7L), "non-empty change page");
+        expectInvalid(() -> SyncApi.requiredChanges(null),
+            "missing dictionary changes must be rejected");
+        expectInvalid(() -> SyncApi.requiredChanges("bad"),
+            "non-array dictionary changes must be rejected");
+        expectInvalid(() -> SyncApi.changePageChanged(false, 8L, 7L),
+            "empty change page must not advance the cursor");
+        expectInvalid(() -> SyncApi.changePageChanged(true, 7L, 7L),
+            "non-empty change page must advance the cursor");
         check(SyncApi.strictSnapshotWeight(100L) == 100L, "integer snapshot weight");
         check(SyncApi.strictSnapshotWeight(1.5d) == null,
             "fractional snapshot weight is rejected");
@@ -30,6 +40,18 @@ public final class SyncApiSmoke {
             "fractional phrase position falls back to index");
         check(SyncApi.strictPhrasePosition(-1L, 2) == 2,
             "negative phrase position falls back to index");
+
+        // A successful response must carry the complete document shape. Treating a
+        // missing field or malformed row as an empty document would let a valid
+        // revision overwrite local state with data that was never returned.
+        expectInvalid(() -> SyncApi.requiredSettings(null),
+            "missing settings must be rejected");
+        expectInvalid(() -> SyncApi.requiredSettings("bad"),
+            "non-object settings must be rejected");
+        expectInvalid(() -> SyncApi.requiredPhrases(null),
+            "missing phrases must be rejected");
+        expectInvalid(() -> SyncApi.requiredPhrases("bad"),
+            "non-array phrases must be rejected");
 
         // Cloud preference revisions are non-negative integers. Fractional JSON numbers
         // must not be truncated by Number.longValue(), and negative revisions are invalid.
@@ -199,4 +221,15 @@ public final class SyncApiSmoke {
     private static void check(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
     }
+
+    private static void expectInvalid(ThrowingAction action, String message) throws Exception {
+        try {
+            action.run();
+            throw new AssertionError(message);
+        } catch (CloudApi.Failure expected) {
+            check(expected.status == 500 && "invalid_response".equals(expected.code), message);
+        }
+    }
+
+    private interface ThrowingAction { void run() throws Exception; }
 }

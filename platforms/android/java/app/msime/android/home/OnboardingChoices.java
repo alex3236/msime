@@ -85,10 +85,7 @@ final class OnboardingChoices {
 
     /** 偏好里存的方案入口，与设置页的方案选择读法相同；本版本没有的方案按 {@link KeyboardScheme#fallback}。 */
     static KeyboardScheme storedScheme(JSONObject preferences, AppEdition edition) {
-        return KeyboardScheme.fromPreferences(
-            preferences.optString("scheme", edition.defaultScheme()),
-            preferences.optString("shuangpin_profile", "xiaohe"),
-            preferences.optString("touch_keyboard_layout", "twenty_six_key"), edition);
+        return SchemePreferences.storedScheme(preferences, edition);
     }
 
     /**

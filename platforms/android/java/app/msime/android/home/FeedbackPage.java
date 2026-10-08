@@ -25,6 +25,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import app.msime.android.AppEdition;
+import app.msime.android.core.InputViewValuePolicy;
 import app.msime.android.CloudApi;
 import app.msime.android.BitmapPolicy;
 import app.msime.android.FeedbackApi;
@@ -335,8 +336,8 @@ public final class FeedbackPage extends DetailPage {
         JSONObject preferences = snapshot == null ? null : snapshot.optJSONObject("preferences");
         if (preferences != null) {
             values.put("scheme", preferences.optString("scheme", ""));
-            values.put("keyboard_layout", preferences.optString("touch_keyboard_layout", ""));
-            values.put("skin", preferences.optString("screen_keyboard_theme", ""));
+            values.put("keyboard_layout", InputViewValuePolicy.textOr(preferences, "touch_keyboard_layout", ""));
+            values.put("skin", InputViewValuePolicy.textOr(preferences, "screen_keyboard_theme", ""));
         }
         values.put("ime_enabled", String.valueOf(ImeSetup.enabled(context)));
         values.put("ime_default", String.valueOf(ImeSetup.isDefault(context)));

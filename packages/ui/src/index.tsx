@@ -791,6 +791,10 @@ export {
 } from "./settings/english-suggestions-section";
 export { LearningSection, type LearningSectionProps } from "./settings/learning-section";
 export {
+  SingleCharacterOnlySection,
+  type SingleCharacterOnlySectionProps,
+} from "./settings/single-character-only-section";
+export {
   LearningDataSection,
   type LearningDataSectionProps,
 } from "./settings/learning-data-section";
@@ -1590,6 +1594,8 @@ export interface HostCapabilities {
   candidate_font_controls: boolean;
   candidate_preedit_font: boolean;
   candidate_page_number: boolean;
+  /** 宿主按 `show_app_logo` 显示或隐藏候选窗和悬浮工具栏左端的水杉 logo（目前只有 macOS）。 */
+  app_logo?: boolean;
   candidate_row_colors: boolean;
   candidate_selection_appearance: boolean;
   /** The host outlines the candidate panel in the border colour. Linux does (Fcitx5's classic UI theme) without any hover state. */
@@ -1740,6 +1746,8 @@ export type Preferences = {
   shuangpin_preedit_uses_raw?: boolean;
   vietnamese?: VietnamesePreferences;
   wubi_mixed_pinyin?: boolean;
+  /** 只出单字：全拼、双拼、五笔和粤拼的候选只留单个汉字；缺省为关。 */
+  single_character_only?: boolean;
   candidate_page_size: number;
   number_row_selection?: boolean;
   candidate_font_size?: number;
@@ -1761,6 +1769,8 @@ export type Preferences = {
   tsf_preedit_style?: "raw" | "pinyin" | "empty";
   candidate_preedit_style?: "pinyin" | "empty";
   show_candidate_page_number?: boolean;
+  /** 候选窗和悬浮工具栏左端的水杉 logo。新装默认隐藏，旧文档缺这个字段时读成显示。 */
+  show_app_logo?: boolean;
   /** The one theme for the candidate window, floating toolbar, menus and touch keyboard. `theme` stays the light/dark mode that `system` and the settings window follow. */
   global_theme?: GlobalTheme;
   /** What the `custom` global theme is made of: an external candidate skin package, the seven candidate colour pickers and the keyboard editor design. */
@@ -2225,6 +2235,11 @@ export {
   providerCredentialErrorMessage,
   tencentSecretConfigured,
 } from "./settings/credential-utils";
+export {
+  aiEndpointHint,
+  aiEndpointProblem,
+  type AiEndpointProblem,
+} from "./settings/ai-endpoint-policy";
 
 type SettingsPageProps = {
   client: SettingsClient;

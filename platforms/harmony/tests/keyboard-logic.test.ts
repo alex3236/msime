@@ -379,6 +379,7 @@ import { PreferenceRevisionPolicy } from "../entry/src/main/ets/keyboard/input/P
 import { PreferencesErrorCode } from "../entry/src/main/ets/keyboard/settings/PreferencesErrorCode";
 import { LocalVoiceModelPolicy } from "../entry/src/main/ets/keyboard/settings/LocalVoiceModelPolicy";
 import { AiAuthenticationPolicy } from "../entry/src/main/ets/keyboard/settings/AiAuthenticationPolicy";
+import { AiEndpointPolicy } from "../entry/src/main/ets/keyboard/settings/AiEndpointPolicy";
 import {
   AiCatalogPage,
   AiModelCatalogPolicy,
@@ -929,6 +930,10 @@ group("keeps translation provider policy bounded and credential-free in signatur
     "cache scope identifies the provider account",
   );
   const signature = TranslationPolicy.signature(query);
+  check(
+    signature !== TranslationPolicy.signature({ ...query, offline_gloss_languages: ["ja"] }),
+    "installing an offline dictionary invalidates the translation request",
+  );
   check(
     TranslationPolicy.shouldReleaseAfterFailure(signature, signature, 4, 4, 7, 7),
     "a failed current translation request can be retried",
@@ -2732,8 +2737,16 @@ group("sentence capitalization looks past closers and whitespace", () => {
     "a full stop ends a sentence",
   );
   check(
-    EnglishCapitalizationPolicy.shouldShift(sentences, "Hi.") === true,
-    "even without the space",
+    EnglishCapitalizationPolicy.shouldShift(sentences, "Hi.") === false,
+    "a stop the cursor is still touching does not start a sentence yet",
+  );
+  check(
+    EnglishCapitalizationPolicy.shouldShift(sentences, 'Hi."') === false,
+    "nor does a stop behind a closing quote with no space",
+  );
+  check(
+    EnglishCapitalizationPolicy.shouldShift(sentences, "3.") === false,
+    "a decimal point is not the end of a sentence",
   );
   check(
     EnglishCapitalizationPolicy.shouldShift(sentences, "Hi") === false,
@@ -2752,8 +2765,12 @@ group("sentence capitalization looks past closers and whitespace", () => {
     "a newline starts a sentence",
   );
   check(
-    EnglishCapitalizationPolicy.shouldShift(sentences, "你好。") === true,
+    EnglishCapitalizationPolicy.shouldShift(sentences, "你好。 ") === true,
     "the full-width stop ends a sentence too",
+  );
+  check(
+    EnglishCapitalizationPolicy.shouldShift(sentences, "你好。") === false,
+    "switching to English right after a Chinese stop stays lowercase",
   );
   check(
     EnglishCapitalizationPolicy.shouldShift(sentences, "   ") === true,
@@ -12860,6 +12877,11 @@ group("AI model catalogs keep each provider's protocol and path", () => {
     AiModelCatalogPolicy.modelsUrl("http://example.test/v1/chat/completions") === null,
     "catalog credentials are never sent over HTTP",
   );
+  check(
+    AiModelCatalogPolicy.modelsUrl("http://192.168.1.20:1234/v1/chat/completions") ===
+      "http://192.168.1.20:1234/v1/models",
+    "a local network model server such as LM Studio may use HTTP",
+  );
   const anthropic = "https://api.anthropic.com/v1/models";
   check(
     AiModelCatalogPolicy.isAnthropic("anthropic", anthropic),
@@ -12883,6 +12905,62 @@ group("AI model catalogs keep each provider's protocol and path", () => {
     ) === "https://api.anthropic.com/v1/models?tenant=synthetic&limit=1000&after_id=claude%2Ffirst",
     "Anthropic pagination replaces stale limit and cursor parameters",
   );
+});
+
+// 与 crates/client-core/src/ai/endpoint.rs 跑同一组用例；这里的判断和 Rust 不一致时，鸿蒙宿主会放行或拒绝与其他平台不同的地址。
+declare const __dirname: string;
+declare function require(name: "fs"): { readFileSync(path: string, encoding: "utf8"): string };
+interface AiEndpointContractCase {
+  endpoint: string;
+  result: string;
+  origin: string | null;
+}
+
+group("AI endpoints allow HTTP only for local network hosts", () => {
+  const contract = JSON.parse(
+    require("fs").readFileSync(
+      `${__dirname}/../../../shared/contracts/ai-endpoint/cases.json`,
+      "utf8",
+    ),
+  ) as { cases: AiEndpointContractCase[] };
+  check(contract.cases.length > 40, "the shared contract is present");
+  for (const item of contract.cases) {
+    const actual = AiEndpointPolicy.check(item.endpoint);
+    check(
+      actual.result === item.result,
+      `${JSON.stringify(item.endpoint)} is ${item.result}, got ${actual.result}`,
+    );
+    check(
+      actual.origin === item.origin,
+      `${JSON.stringify(item.endpoint)} keys its token as ${item.origin}, got ${actual.origin}`,
+    );
+  }
+  // 非规范的数字主机交给 curl 时可能被解析成别的地址（`010.0.0.1` 可能是八进制的 8.0.0.1），一律按无效拒绝。
+  for (const endpoint of [
+    "http://010.0.0.1/v1",
+    "http://10.1/v1",
+    "http://0x7f000001/v1",
+    "http://192.168.1.5./v1",
+    "http://256.1.1.1/v1",
+  ]) {
+    check(
+      AiEndpointPolicy.check(endpoint).result === "invalid",
+      `${endpoint} is refused rather than guessed`,
+    );
+  }
+  check(
+    AiEndpointPolicy.check("http://[FE80:0:0::1]:1234/v1").origin === "http://[fe80::1]:1234",
+    "IPv6 origins use the canonical text",
+  );
+  check(
+    AiEndpointPolicy.check("http://[::ffff:192.168.1.2]/v1").result === "cleartext_public",
+    "IPv4-mapped addresses are not treated as local, as in Rust",
+  );
+  check(
+    AiEndpointPolicy.check("http://localhost:/v1").origin === "http://localhost:80",
+    "an empty port means the default",
+  );
+  check(AiEndpointPolicy.CLEARTEXT_HINT.includes("https"), "the refusal names the alternative");
 });
 
 group("AI model catalogs filter capabilities and paginate safely", () => {

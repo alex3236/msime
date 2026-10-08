@@ -55,17 +55,21 @@ impl WubiScheme {
 
     /// Every string field is the raw code; valid when non-empty.
     pub fn build_request(&self) -> QueryRequest {
-        QueryRequest {
-            scheme: SchemeType::Wubi,
-            raw_input: self.raw.clone(),
-            raw_input_with_cases: self.raw.clone(),
-            normalized_input: self.raw.clone(),
-            raw_segmentation: self.raw.clone(),
-            normalized_segmentation: self.raw.clone(),
-            segmentation: self.raw.clone(),
-            valid: !self.raw.is_empty(),
-            ..QueryRequest::default()
-        }
+        let mut request = QueryRequest::default();
+        self.build_request_into(&mut request);
+        request
+    }
+
+    /// 将五笔请求写入已有存储，避免逐键刷新重复克隆同一码字符串。
+    pub fn build_request_into(&self, request: &mut QueryRequest) {
+        request.scheme = SchemeType::Wubi;
+        request.raw_input.clone_from(&self.raw);
+        request.raw_input_with_cases.clone_from(&self.raw);
+        request.normalized_input.clone_from(&self.raw);
+        request.raw_segmentation.clone_from(&self.raw);
+        request.normalized_segmentation.clone_from(&self.raw);
+        request.segmentation.clone_from(&self.raw);
+        request.valid = !self.raw.is_empty();
     }
 
     pub fn preedit(&self) -> String {
@@ -75,13 +79,15 @@ impl WubiScheme {
     /// Host editing: lowercase, filter to the alphabet and clip to the current limit. The C++ read `raw_input_with_cases` when it was non-empty; after lowercasing both spellings give the same code, so either may be passed.
     pub fn set_raw_input(&mut self, raw: &str) {
         let limit = self.max_code_length();
-        self.raw = raw
-            .bytes()
-            .map(|byte| byte.to_ascii_lowercase())
-            .filter(|&lower| is_wubi_letter(lower, self.mixed_pinyin_allowed))
-            .take(limit)
-            .map(char::from)
-            .collect();
+        self.raw.clear();
+        self.raw.reserve(limit.min(raw.len()));
+        self.raw.extend(
+            raw.bytes()
+                .map(|byte| byte.to_ascii_lowercase())
+                .filter(|&lower| is_wubi_letter(lower, self.mixed_pinyin_allowed))
+                .take(limit)
+                .map(char::from),
+        );
     }
 
     /// Exactly four letters. Longer mixed-pinyin spellings are fallback queries, not complete wubi codes.
@@ -194,6 +200,20 @@ mod tests {
         scheme.set_extended_length_allowed(true);
         scheme.set_raw_input("Ni'Hao");
         assert_eq!(scheme.preedit(), "nihao");
+    }
+
+    #[test]
+    fn set_raw_input_reuses_existing_storage() {
+        let mut scheme = WubiScheme::new();
+        scheme.set_mixed_pinyin_allowed(true);
+        scheme.set_extended_length_allowed(true);
+        scheme.set_raw_input("abcdefghijklmnopqrstuvwxyzabcdef");
+        let capacity = scheme.raw.capacity();
+
+        scheme.set_raw_input("ab");
+
+        assert_eq!(scheme.preedit(), "ab");
+        assert!(scheme.raw.capacity() >= capacity);
     }
 
     #[test]

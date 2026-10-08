@@ -10,6 +10,7 @@ import android.widget.TextView;
 import androidx.annotation.Nullable;
 import app.msime.android.AndroidLocalSettings;
 import app.msime.android.AppEdition;
+import app.msime.android.ClipboardLayoutPolicy;
 import app.msime.android.KeyboardFeedbackPreferences;
 import app.msime.android.KeyboardFeedbackStore;
 import app.msime.android.KeyboardGeometry;
@@ -23,10 +24,11 @@ import app.msime.android.SwipeHintPolicy;
 import app.msime.android.SyncSignals;
 import app.msime.android.SyncSwitch;
 import app.msime.android.ViewPolicy;
+import app.msime.android.core.InputViewValuePolicy;
 import org.json.JSONObject;
 
 /**
- * 键盘页：布局（中文键盘 26 / 9 键、九键字母与数字键盘的左侧符号、9 键数字键盘顺序、键盘高度、按键间距、行间距、横屏分离式键盘、浮动键盘）、按键反馈（按键音、按键振动、按键弹出预览、按键动画）、手势（滑动输入符号及其方向、滑行输入、空格滑动移动光标、长按空格语音）、键盘工具栏（预览、显示方式、各按钮）和子页「AI 润色与回复」。
+ * 键盘页：布局（中文键盘 26 / 9 键、九键字母与数字键盘的左侧符号、9 键数字键盘顺序、键盘高度、按键间距、行间距、横屏分离式键盘、浮动键盘）、按键反馈（按键音、按键振动、按键弹出预览、按键动画）、手势（滑动输入符号及其方向、滑行输入、空格滑动移动光标、长按空格语音）、键盘工具栏（预览、显示方式、各按钮）、剪贴板（工具栏显示最近复制、排列）和子页「AI 润色与回复」。
  *
  * <p>键盘与本页读同一批存储：按键间距、行间距、数字键盘顺序和表情/剪贴板/皮肤三个工具栏按钮在共享偏好里（`touch_key_spacing_tenths`、`touch_row_spacing_tenths`、`touch_number_keypad_order`、`touch_toolbar.*`）；键盘高度、横屏分离式键盘、浮动键盘、按键弹出预览、按键动画、三个手势、常用语/输入方式/浮动键盘三个工具栏按钮和「显示方式：隐藏」（整行不显示，候选条照常显示）只有 Android 用，在 {@link AndroidLocalSettings} 里。键盘高度按设计以 75–160 % 显示，存的是 dp（{@link KeyboardGeometry#heightPercentToAdjustment}），本地没写过时沿用共享偏好里旧的 `touch_keyboard_height_adjustment`。按键音和按键振动是 Android 一直以来的本地开关（`KeyboardFeedbackStore`），键盘的功能面板改的也是它们。
  */
@@ -79,10 +81,7 @@ public final class KeyboardOptionsPage extends DetailPage {
         JSONObject preferences = state.preferences();
         AndroidLocalSettings.Snapshot settings = state.local();
         AppEdition edition = AppEdition.current();
-        KeyboardScheme current = KeyboardScheme.fromPreferences(
-            preferences.optString("scheme", edition.defaultScheme()),
-            preferences.optString("shuangpin_profile", "xiaohe"),
-            preferences.optString("touch_keyboard_layout", "twenty_six_key"), edition);
+        KeyboardScheme current = SchemePreferences.storedScheme(preferences, edition);
 
         GroupCard layout = GroupCard.add(target, "布局");
         boolean nineKey = "nine_key".equals(current.touchKeyboardLayout());
@@ -179,6 +178,18 @@ public final class KeyboardOptionsPage extends DetailPage {
                 checked -> saveToolbar(member, checked));
             row.setEnabled(!hidden);
         }
+
+        GroupCard clipboard = GroupCard.add(target, "剪贴板");
+        // 剪贴板历史关着时键盘不显示最近复制，也不为它读剪贴板（RecentClipboardSuggestion.enabled），这一项跟着置灰。
+        boolean clipboardHistory = preferences.optBoolean("clipboard_history", false);
+        GroupCard.Row recentClipRow = clipboard.toggle("工具栏显示最近复制",
+            "复制文字后一分钟内，键盘顶部显示这段文字，点按即可粘贴；需先在「隐私」里打开剪贴板历史。隐私模式、密码框和系统标为敏感的内容不显示",
+            settings.bool(AndroidLocalSettings.CLIPBOARD_SUGGESTION),
+            checked -> saveLocal(AndroidLocalSettings.CLIPBOARD_SUGGESTION, checked));
+        recentClipRow.setEnabled(clipboardHistory);
+        String columns = settings.choice(AndroidLocalSettings.CLIPBOARD_COLUMNS);
+        clipboard.nav("排列", "剪贴板面板里一行显示几条记录", clipboardColumnsLabel(columns),
+            () -> pickClipboardColumns(columns));
 
         GroupCard more = GroupCard.add(target, "更多");
         more.nav("AI 润色与回复", "端点、模型、凭据和提示词", null,
@@ -291,6 +302,19 @@ public final class KeyboardOptionsPage extends DetailPage {
                 () -> saveLocal(AndroidLocalSettings.SWIPE_SYMBOLS_DIRECTION, value));
         }
         sheet.show();
+    }
+
+    private void pickClipboardColumns(String selected) {
+        OptionSheet sheet = new OptionSheet(requireContext(), "剪贴板排列", null);
+        for (String value : new String[] {ClipboardLayoutPolicy.ONE_COLUMN, ClipboardLayoutPolicy.TWO_COLUMNS}) {
+            sheet.option(clipboardColumnsLabel(value), value.equals(selected),
+                () -> saveLocal(AndroidLocalSettings.CLIPBOARD_COLUMNS, value));
+        }
+        sheet.show();
+    }
+
+    private static String clipboardColumnsLabel(String value) {
+        return ClipboardLayoutPolicy.columns(value) == 2 ? "双列" : "单列";
     }
 
     private void pickNineKeySwipe(String selected, GroupCard.Row row) {

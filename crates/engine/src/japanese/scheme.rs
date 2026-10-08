@@ -38,20 +38,35 @@ impl JapaneseRomajiScheme {
 
     /// `normalized_segmentation` is the hiragana plus pending letters.
     pub fn build_request(&self) -> QueryRequest {
-        let raw_input = self.raw.to_ascii_lowercase();
-        let conversion = convert_romaji(&raw_input);
-        let reading = conversion.hiragana + &conversion.pending;
-        QueryRequest {
-            scheme: SchemeType::JapaneseRomaji,
-            normalized_input: raw_input.clone(),
-            raw_input,
-            raw_input_with_cases: self.raw.clone(),
-            raw_segmentation: self.raw.clone(),
-            normalized_segmentation: reading.clone(),
-            segmentation: reading,
-            valid: !self.raw.is_empty(),
-            ..QueryRequest::default()
-        }
+        let mut request = QueryRequest::default();
+        self.build_request_into(&mut request);
+        request
+    }
+
+    /// 将日文请求写入已有存储，避免逐键刷新重复构建罗马字和假名字符串。
+    pub fn build_request_into(&self, request: &mut QueryRequest) {
+        request.scheme = SchemeType::JapaneseRomaji;
+        request.raw_input.clear();
+        request.raw_input.extend(
+            self.raw
+                .bytes()
+                .map(|byte| char::from(byte.to_ascii_lowercase())),
+        );
+        request.normalized_input.clone_from(&request.raw_input);
+        request.raw_input_with_cases.clone_from(&self.raw);
+        request.raw_segmentation.clone_from(&self.raw);
+        let conversion = convert_romaji(&request.raw_input);
+        request.normalized_segmentation.clear();
+        request
+            .normalized_segmentation
+            .push_str(&conversion.hiragana);
+        request
+            .normalized_segmentation
+            .push_str(&conversion.pending);
+        request
+            .segmentation
+            .clone_from(&request.normalized_segmentation);
+        request.valid = !self.raw.is_empty();
     }
 
     pub fn preedit(&self) -> String {
@@ -65,12 +80,11 @@ impl JapaneseRomajiScheme {
         } else {
             raw_with_cases
         };
-        self.raw = source
-            .chars()
-            .filter(|&character| {
-                character.is_ascii_alphabetic() || character == '\'' || character == '-'
-            })
-            .collect();
+        self.raw.clear();
+        self.raw.reserve(source.len());
+        self.raw.extend(source.chars().filter(|&character| {
+            character.is_ascii_alphabetic() || character == '\'' || character == '-'
+        }));
     }
 
     /// Replace the last kana with its next variant and re-romanise; false when nothing changed. A half-typed romaji tail is not a kana yet, so there is nothing to modify.
@@ -143,6 +157,18 @@ mod tests {
         assert_eq!(scheme.preedit(), "ToKyo");
         scheme.set_raw_input("n'a", "");
         assert_eq!(scheme.preedit(), "n'a");
+    }
+
+    #[test]
+    fn set_raw_input_reuses_existing_storage() {
+        let mut scheme = JapaneseRomajiScheme::new();
+        scheme.set_raw_input("abcdefghijklmnopqrstuvwxyz", "");
+        let capacity = scheme.raw.capacity();
+
+        scheme.set_raw_input("ka", "");
+
+        assert_eq!(scheme.preedit(), "ka");
+        assert!(scheme.raw.capacity() >= capacity);
     }
 
     #[test]

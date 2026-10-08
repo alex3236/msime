@@ -14,6 +14,8 @@ import app.msime.android.ResourcePackService;
 import app.msime.android.ResourcePacks;
 import app.msime.android.SchemePreferences;
 import app.msime.android.policy.HostOptionsPolicy;
+import app.msime.android.core.InputViewValuePolicy;
+import app.msime.android.core.InputViewValuePolicy;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -235,6 +237,10 @@ public final class TypingPage extends DetailPage {
         JSONObject fuzzy = preferences.optJSONObject("fuzzy_pinyin");
         chinese.toggle("模糊音", "如 z/zh、an/ang 不分", fuzzy != null && fuzzy.optBoolean("enabled", false),
             checked -> save(values -> KeyboardSheets.child(values, "fuzzy_pinyin").put("enabled", checked)));
+        InputFeatureToggle single = InputFeatureToggle.SINGLE_CHARACTER_ONLY;
+        chinese.toggle(single.title(), single.description(),
+            preferences.optBoolean(single.key(), single.enabledByDefault()),
+            checked -> save(values -> values.put(single.key(), checked)));
         InputFeatureToggle cloud = InputFeatureToggle.CLOUD_CANDIDATES;
         chinese.toggle(cloud.title(), cloud.description(), preferences.optBoolean(cloud.key(), cloud.enabledByDefault()),
             checked -> save(values -> values.put(cloud.key(), checked)));
@@ -258,7 +264,7 @@ public final class TypingPage extends DetailPage {
             checked -> save(values -> values.put(translations.key(), checked)));
         InputFeatureToggle gloss = InputFeatureToggle.CANDIDATE_ENGLISH_GLOSS;
         boolean glossOn = preferences.optBoolean(gloss.key(), gloss.enabledByDefault());
-        String targetLanguage = preferences.optString("translation_target_language", "en");
+        String targetLanguage = InputViewValuePolicy.textOr(preferences, "translation_target_language", "en");
         translation.toggle("离线英文释义", "给候选词标注离线释义；英语释义随应用自带，其他目标语言要下载离线释义词典",
             glossOn, checked -> save(values -> values.put(gloss.key(), checked),
                 () -> { if (checked) ensureGlosses(targetLanguage, state); }));
@@ -339,10 +345,7 @@ public final class TypingPage extends DetailPage {
      */
     private static KeyboardScheme applied(JSONObject preferences, AppEdition edition, String dictionaries,
             Set<String> packs) {
-        KeyboardScheme fromScheme = KeyboardScheme.fromPreferences(
-            preferences.optString("scheme", edition.defaultScheme()),
-            preferences.optString("shuangpin_profile", "xiaohe"),
-            preferences.optString("touch_keyboard_layout", "twenty_six_key"), edition);
+        KeyboardScheme fromScheme = SchemePreferences.storedScheme(preferences, edition);
         JSONObject schemes = preferences.optJSONObject("touch_keyboard_schemes");
         String selected = schemes == null || schemes.isNull("selected") ? null : schemes.optString("selected", null);
         List<KeyboardScheme> visible = KeyboardScheme.installedOf(List.of(KeyboardScheme.values()), dictionaries, packs, edition);
@@ -395,7 +398,7 @@ public final class TypingPage extends DetailPage {
         return switch (scheme) {
             case QUANPIN, QUANPIN_NINE_KEY -> "全拼";
             case CANTONESE -> "粤拼";
-            case WUBI -> scheme.title(preferences.optString("wubi_profile", KeyboardScheme.WUBI_86));
+            case WUBI -> scheme.title(InputViewValuePolicy.textOr(preferences, "wubi_profile", KeyboardScheme.WUBI_86));
             case JAPANESE -> "26 键";
             case JAPANESE_NINE_KEY -> "9 键";
             default -> scheme.title();
@@ -426,7 +429,7 @@ public final class TypingPage extends DetailPage {
             }
             if (offered.contains(KeyboardScheme.WUBI)) {
                 String profile = KeyboardScheme.normalizedWubiProfile(
-                    preferences.optString("wubi_profile", KeyboardScheme.WUBI_86));
+                    InputViewValuePolicy.textOr(preferences, "wubi_profile", KeyboardScheme.WUBI_86));
                 boolean wubi = applied == KeyboardScheme.WUBI;
                 sheet.submenu("五笔（" + wubiName(profile) + "）", wubi, () -> {
                     OptionSheet next = new OptionSheet(context, "五笔", "选择五笔方案");

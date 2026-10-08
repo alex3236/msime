@@ -10,6 +10,7 @@ import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import app.msime.android.CandidateTranslationPolicy;
 import app.msime.android.core.InputViewValuePolicy;
+import app.msime.android.core.InputViewValuePolicy;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -162,7 +163,7 @@ final class ImeCandidates {
             JSONObject current = s.visibleCandidate(slot);
             JSONObject id = current == null ? null : current.optJSONObject("id");
             if (id == null || (!s.candidateManagementEnabled() && !s.candidateGlossInsertionEnabled())) return false;
-            String text = s.chineseOutput(current.optString("text"), s.view);
+            String text = s.chineseOutput(InputViewValuePolicy.textOr(current, "text", ""), s.view);
             return showCandidateMenu(button, slot, id, text);
         });
         return button;
@@ -171,10 +172,10 @@ final class ImeCandidates {
     Button expandedCandidateButton(JSONObject candidate) {
         JSONObject id = candidate.optJSONObject("id");
         Button button = candidateButton();
-        String text = s.chineseOutput(candidate.optString("text"), s.view);
+        String text = s.chineseOutput(InputViewValuePolicy.textOr(candidate, "text", ""), s.view);
         boolean highlighted = InputViewValuePolicy.booleanValue(candidate, "highlighted", false);
         String typed = s.candidatePanelSnapshot == null ? ""
-            : s.candidatePanelSnapshot.optString("preedit", "");
+            : InputViewValuePolicy.textOr(s.candidatePanelSnapshot, "preedit", "");
         String annotation = s.candidateAnnotation(candidate, typed);
         button.setText(s.candidateLabel("", text, annotation, highlighted));
         int labelLines = MSIMEInputService.candidateLabelLines(annotation);
@@ -274,9 +275,9 @@ final class ImeCandidates {
         KeyboardGeometry.setSymmetricPaddingDp(s.expandedCandidates, s, 8, 6);
         JSONArray entries = s.candidatePanelSnapshot.optJSONArray("candidates");
         int count = entries == null ? 0 : entries.length();
-        String reading = s.candidatePanelSnapshot.optString("reading", "");
+        String reading = InputViewValuePolicy.textOr(s.candidatePanelSnapshot, "reading", "");
         String compositionText = reading.isEmpty()
-            ? s.candidatePanelSnapshot.optString("preedit", "") : reading;
+            ? InputViewValuePolicy.textOr(s.candidatePanelSnapshot, "preedit", "") : reading;
         // 设计的网格不画标题；组合文本和候选总数留在网格的描述里给读屏。
         CandidateWrapLayout list = new CandidateWrapLayout(s, s.pixels(6));
         list.setContentDescription("完整候选列表；" + compositionText + "；" + count + " 个候选");

@@ -75,9 +75,11 @@ public final class SyncApi {
     public SyncApi(Context context, long bindingGeneration) {
         Context application = context.getApplicationContext();
         this.account = rejected -> {
-            if (SyncSwitch.bindingGeneration(application) != bindingGeneration) return "";
-            String token = new BackendAccount(application).currentAccessToken(rejected);
-            return SyncSwitch.bindingGeneration(application) == bindingGeneration ? token : "";
+            synchronized (SyncSwitch.bindingLock()) {
+                if (SyncSwitch.bindingGeneration(application) != bindingGeneration) return "";
+                String token = new BackendAccount(application).currentAccessToken(rejected);
+                return SyncSwitch.bindingGeneration(application) == bindingGeneration ? token : "";
+            }
         };
         this.cloud = new CloudApi(application, this.account);
         this.streams = new HttpStreams();
@@ -120,17 +122,25 @@ public final class SyncApi {
 
     static Preferences parsePreferences(JSONObject root) throws CloudApi.Failure {
         long revision = preferenceRevision(root.opt("revision"));
-        JSONObject raw = root.optJSONObject("settings");
-        LinkedHashMap<String, Object> settings = new LinkedHashMap<>(raw == null ? 0 : raw.length());
-        if (raw != null) {
-            Iterator<String> keys = raw.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                Object value = raw.opt(key);
-                if (value instanceof String || value instanceof Boolean || value instanceof Number) settings.put(key, value);
+        JSONObject raw = requiredSettings(root.opt("settings"));
+        LinkedHashMap<String, Object> settings = new LinkedHashMap<>(raw.length());
+        Iterator<String> keys = raw.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            Object value = raw.opt(key);
+            if (value instanceof String || value instanceof Boolean || value instanceof Number) {
+                settings.put(key, value);
+            } else {
+                throw invalid("preferences setting must be scalar");
             }
         }
         return new Preferences(revision, Collections.unmodifiableMap(settings));
+    }
+
+    /** Successful preference responses always carry an object, including an empty one. */
+    static JSONObject requiredSettings(Object value) throws CloudApi.Failure {
+        if (!(value instanceof JSONObject)) throw invalid("preferences settings missing");
+        return (JSONObject) value;
     }
 
     /** Account preference revisions are JSON integers in the non-negative long range. */
@@ -170,26 +180,32 @@ public final class SyncApi {
 
     static Phrases parsePhrases(JSONObject root) throws CloudApi.Failure {
         long revision = phraseRevision(root.opt("revision"));
-        JSONArray raw = root.optJSONArray("phrases");
-        if (raw != null && raw.length() > SyncMergePolicy.MAX_PHRASES)
+        JSONArray raw = requiredPhrases(root.opt("phrases"));
+        if (raw.length() > SyncMergePolicy.MAX_PHRASES)
             throw invalid("too many phrases");
-        List<SyncMergePolicy.Phrase> phrases = new ArrayList<>(raw == null ? 0 : raw.length());
-        if (raw != null) {
-            for (int index = 0; index < raw.length(); index++) {
-                JSONObject value = raw.optJSONObject(index);
-                if (value == null) continue;
-                Object id = value.opt("id");
-                Object text = value.opt("text");
-                if (!(id instanceof String) || !(text instanceof String)) continue;
-                Object group = value.opt("group");
-                Object position = value.opt("position");
-                phrases.add(new SyncMergePolicy.Phrase((String) id, (String) text,
-                    group instanceof String ? (String) group : "",
-                    strictPhrasePosition(position, index)));
-            }
+        List<SyncMergePolicy.Phrase> phrases = new ArrayList<>(raw.length());
+        for (int index = 0; index < raw.length(); index++) {
+            JSONObject value = raw.optJSONObject(index);
+            if (value == null) throw invalid("phrase row must be an object");
+            Object id = value.opt("id");
+            Object text = value.opt("text");
+            if (!(id instanceof String) || !(text instanceof String))
+                throw invalid("phrase row is malformed");
+            Object group = value.opt("group");
+            if (group != null && !(group instanceof String)) throw invalid("phrase group is malformed");
+            Object position = value.opt("position");
+            phrases.add(new SyncMergePolicy.Phrase((String) id, (String) text,
+                group instanceof String ? (String) group : "",
+                strictPhrasePosition(position, index)));
         }
         phrases.sort((left, right) -> Integer.compare(left.position(), right.position()));
         return new Phrases(revision, Collections.unmodifiableList(phrases));
+    }
+
+    /** Successful phrase responses always carry an array, including an empty one. */
+    static JSONArray requiredPhrases(Object value) throws CloudApi.Failure {
+        if (!(value instanceof JSONArray)) throw invalid("phrases missing");
+        return (JSONArray) value;
     }
 
     /** Common phrase positions are bounded JSON integers; malformed values keep response order. */
@@ -216,10 +232,26 @@ public final class SyncApi {
     /** 云端自 `after` 以来有没有词库改动（只取一条）。 */
     public DictionaryProbe dictionaryChangedSince(long after) throws CloudApi.Failure {
         JSONObject page = cloud.json("GET", changesPath(after), null, CloudApi.Auth.ACCOUNT);
-        JSONArray changes = page.optJSONArray("changes");
+        JSONArray changes = requiredChanges(page.opt("changes"));
         long minimum = BoundsPolicy.nonNegative(after);
         long revision = changesRevision(page.opt("next"), minimum);
-        return new DictionaryProbe(changes != null && changes.length() > 0, revision);
+        boolean changed = changes.length() > 0;
+        changePageChanged(changed, revision, minimum);
+        return new DictionaryProbe(changed, revision);
+    }
+
+    /** Successful dictionary change pages always carry an array, including an empty one. */
+    static JSONArray requiredChanges(Object value) throws CloudApi.Failure {
+        if (!(value instanceof JSONArray)) throw invalid("dictionary changes missing");
+        return (JSONArray) value;
+    }
+
+    /** An empty page must stay on the requested cursor; a non-empty page must advance it. */
+    static boolean changePageChanged(boolean changed, long revision, long minimum)
+            throws CloudApi.Failure {
+        long floor = BoundsPolicy.nonNegative(minimum);
+        if (changed ? revision <= floor : revision != floor) throw invalid("dictionary change cursor");
+        return changed;
     }
 
     /** Dictionary change cursors are non-negative integer revisions and cannot move backwards. */
