@@ -679,6 +679,19 @@ fn a_mixed_list_holds_both_producers_wubi_first() {
     assert!(!snapshot.wubi_unique_four_code);
 }
 
+#[test]
+fn wubi_mixed_refresh_reuses_pinyin_request_buffer() {
+    let fixture = Fixture::new(WUBI_ROUTING_FIXTURE);
+    let mut session = wubi_mixed(&fixture);
+    let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+        session.input.engine.handle_key(SchemeKey::Requery);
+    });
+    assert!(
+        allocations <= 53,
+        "mixed Wubi refresh should reuse the pinyin request buffer: {allocations} allocations"
+    );
+}
+
 /// The reported case: in mixed Wubi `jixu` is the wubi code of 曳光弹 and the pinyin of 继续. The fourth key must leave both on offer; without pinyin rows the same code still commits its one wubi row.
 #[test]
 fn a_four_letter_code_that_is_also_pinyin_stays_open_in_mixed_wubi() {
@@ -3757,6 +3770,45 @@ fn shuangpin_refresh_reuses_request_strings() {
     );
 }
 
+#[test]
+fn shuangpin_double_helpcode_refresh_reuses_request_strings() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.helpcode = true;
+    });
+    type_text(&mut session, "nihcAB");
+    let request = session.input.engine.request();
+    assert_eq!(request.raw_segmentation, "ni'hc'AB");
+    assert_eq!(request.normalized_segmentation, "ni'hao'AB");
+    let pointers = [
+        request.raw_input.as_ptr(),
+        request.raw_input_with_cases.as_ptr(),
+        request.normalized_input.as_ptr(),
+        request.raw_segmentation.as_ptr(),
+        request.normalized_segmentation.as_ptr(),
+        request.segmentation.as_ptr(),
+    ];
+
+    session.input.engine.handle_key(SchemeKey::Requery);
+
+    let request = session.input.engine.request();
+    assert_eq!(request.raw_segmentation, "ni'hc'AB");
+    assert_eq!(request.normalized_segmentation, "ni'hao'AB");
+    assert_eq!(request.segmentation, "ni'hao'AB");
+    assert_eq!(
+        [
+            request.raw_input.as_ptr(),
+            request.raw_input_with_cases.as_ptr(),
+            request.normalized_input.as_ptr(),
+            request.raw_segmentation.as_ptr(),
+            request.normalized_segmentation.as_ptr(),
+            request.segmentation.as_ptr(),
+        ],
+        pointers
+    );
+}
+
 /// 合成的 `msime-stroke.db`（`stroke::fixture`），用共享的 schema 写成。
 fn stroke_dictionary(directory: &Path) -> PathBuf {
     let path = directory.join("msime-stroke.db");
@@ -4265,6 +4317,35 @@ fn zhuyin_candidate_refresh_reuses_row_storage() {
     assert!(
         allocations <= 6,
         "requery should not recreate Zhuyin candidate rows: {allocations} allocations"
+    );
+}
+
+#[test]
+fn zhuyin_refresh_reuses_request_strings() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = zhuyin_session(&fixture);
+    type_text(&mut session, "su3cl3");
+    let request = session.input.engine.request();
+    let pointers = [
+        request.raw_input.as_ptr(),
+        request.raw_input_with_cases.as_ptr(),
+        request.normalized_input.as_ptr(),
+        request.raw_segmentation.as_ptr(),
+        request.normalized_segmentation.as_ptr(),
+        request.segmentation.as_ptr(),
+    ];
+    session.input.engine.handle_key(SchemeKey::Requery);
+    let request = session.input.engine.request();
+    assert_eq!(
+        [
+            request.raw_input.as_ptr(),
+            request.raw_input_with_cases.as_ptr(),
+            request.normalized_input.as_ptr(),
+            request.raw_segmentation.as_ptr(),
+            request.normalized_segmentation.as_ptr(),
+            request.segmentation.as_ptr(),
+        ],
+        pointers
     );
 }
 

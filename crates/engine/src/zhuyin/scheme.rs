@@ -218,12 +218,41 @@ impl ZhuyinScheme {
         keys
     }
 
+    fn editing_text_into(&self, keys: &mut String) {
+        append_editing_keys(&self.syllables, &self.pending, keys);
+        keys.reserve(self.pending_digits.len());
+        keys.extend(self.pending_digits.iter().map(|digit| char::from(*digit)));
+    }
+
     /// 转换后的文字加上还在拼的部分：大千是待定的注音符号，例如 `你好ㄇㄚ`；九键是还没按声调的数字，例如 `你好28`。
     pub fn reading(&self) -> String {
-        let mut reading = self.converted_text();
-        reading.push_str(&self.pending.bopomofo());
+        let mut reading = build_converted_text(&self.conversion);
+        if let Some(symbol) = self.pending.initial {
+            reading.push(symbol);
+        }
+        if let Some(symbol) = self.pending.medial {
+            reading.push(symbol);
+        }
+        if let Some(symbol) = self.pending.rime {
+            reading.push(symbol);
+        }
         reading.extend(self.pending_digits.iter().map(|digit| char::from(*digit)));
         reading
+    }
+
+    fn reading_into(&self, reading: &mut String) {
+        append_converted_text(&self.conversion, reading);
+        if let Some(symbol) = self.pending.initial {
+            reading.push(symbol);
+        }
+        if let Some(symbol) = self.pending.medial {
+            reading.push(symbol);
+        }
+        if let Some(symbol) = self.pending.rime {
+            reading.push(symbol);
+        }
+        reading.reserve(self.pending_digits.len());
+        reading.extend(self.pending_digits.iter().map(|digit| char::from(*digit)));
     }
 
     /// What the session shows and tests for a composition: the reading, which is empty exactly when nothing is composing.
@@ -233,17 +262,22 @@ impl ZhuyinScheme {
 
     /// The request the session keeps for the composition. Nothing is queried with it, since the list rows come from the editor itself; `raw_input` is the typed keys the caret-locked editing text shows and `normalized_segmentation` the reading the snapshot draws.
     pub fn build_request(&self) -> QueryRequest {
-        let keys = self.editing_text();
-        QueryRequest {
-            scheme: SchemeType::Zhuyin,
-            raw_input: keys.clone(),
-            raw_input_with_cases: keys.clone(),
-            normalized_input: keys.clone(),
-            raw_segmentation: keys,
-            normalized_segmentation: self.reading(),
-            valid: self.is_composing(),
-            ..QueryRequest::default()
-        }
+        let mut request = QueryRequest::default();
+        self.build_request_into(&mut request);
+        request
+    }
+
+    /// 将注音请求写入已有存储，避免刷新时重复复制按键和读音字符串。
+    pub fn build_request_into(&self, request: &mut QueryRequest) {
+        request.scheme = SchemeType::Zhuyin;
+        self.editing_text_into(&mut request.raw_input);
+        request.raw_input_with_cases.clone_from(&request.raw_input);
+        request.normalized_input.clone_from(&request.raw_input);
+        request.raw_segmentation.clone_from(&request.raw_input);
+        self.reading_into(&mut request.normalized_segmentation);
+        request.segmentation.clear();
+        request.korean_hanja = false;
+        request.valid = self.is_composing();
     }
 
     pub fn converted_text(&self) -> String {
@@ -370,11 +404,17 @@ impl ZhuyinScheme {
             self.close_list();
         }
         if byte.is_ascii_digit() {
-            let mut next = self.pending_digits.clone();
-            next.push(byte);
-            if next.len() <= nine_key::MAX_DIGITS && self.nine_key_index()?.accepts(&next) {
-                self.pending_digits = next;
+            if self.pending_digits.len() == nine_key::MAX_DIGITS {
+                return Ok(true);
             }
+            let mut next = std::mem::take(&mut self.pending_digits);
+            next.push(byte);
+            let accepted = self.nine_key_index().map(|index| index.accepts(&next));
+            if !matches!(accepted, Ok(true)) {
+                next.pop();
+            }
+            self.pending_digits = next;
+            accepted?;
             return Ok(true);
         }
         let Some(mark) = mark else {
@@ -678,6 +718,18 @@ fn describe(positions: &[&[String]]) -> String {
 }
 
 fn build_editing_keys(syllables: &[Syllable], pending: &PendingSyllable) -> String {
+    let mut keys = String::new();
+    append_editing_keys(syllables, pending, &mut keys);
+    keys
+}
+
+fn build_converted_text(spans: &[Span]) -> String {
+    let mut text = String::new();
+    append_converted_text(spans, &mut text);
+    text
+}
+
+fn append_editing_keys(syllables: &[Syllable], pending: &PendingSyllable, keys: &mut String) {
     let pending_capacity = usize::from(pending.initial.is_some())
         + usize::from(pending.medial.is_some())
         + usize::from(pending.rime.is_some());
@@ -686,21 +738,25 @@ fn build_editing_keys(syllables: &[Syllable], pending: &PendingSyllable) -> Stri
         .map(|syllable| syllable.keys.len())
         .sum::<usize>()
         + pending_capacity;
-    let mut keys = String::with_capacity(capacity);
+    keys.clear();
+    if keys.capacity() < capacity {
+        keys.reserve(capacity - keys.capacity());
+    }
     for syllable in syllables {
         keys.push_str(&syllable.keys);
     }
-    pending.append_keys(&mut keys);
-    keys
+    pending.append_keys(keys);
 }
 
-fn build_converted_text(spans: &[Span]) -> String {
-    let capacity = spans.iter().map(|span| span.text.len()).sum();
-    let mut text = String::with_capacity(capacity);
+fn append_converted_text(spans: &[Span], text: &mut String) {
+    let capacity = spans.iter().map(|span| span.text.len()).sum::<usize>();
+    text.clear();
+    if text.capacity() < capacity {
+        text.reserve(capacity - text.capacity());
+    }
     for span in spans {
         text.push_str(&span.text);
     }
-    text
 }
 
 #[cfg(test)]
@@ -1309,6 +1365,44 @@ mod tests {
         type_keys(&mut scheme, "17b17 ");
         assert_eq!(scheme.converted_text(), "嗎媽");
         assert!(scheme.nine_key());
+    }
+
+    #[test]
+    fn nine_key_digit_edits_reuse_pending_storage() {
+        let (_dir, mut scheme) = nine_key_scheme();
+        scheme.nine_key_index().unwrap();
+        scheme.pending_digits.reserve(nine_key::MAX_DIGITS);
+        let pointer = scheme.pending_digits.as_ptr();
+
+        let ((), allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            assert!(scheme.handle_key(ZhuyinKey::Char(b'2')).unwrap());
+            assert!(scheme.handle_key(ZhuyinKey::Char(b'8')).unwrap());
+            assert!(scheme.handle_key(ZhuyinKey::Char(b'2')).unwrap());
+            assert_eq!(scheme.pending_digits, b"28");
+            assert!(scheme.handle_key(ZhuyinKey::Backspace).unwrap());
+            assert!(scheme.handle_key(ZhuyinKey::Char(b'9')).unwrap());
+        });
+
+        assert_eq!(allocations, 0);
+        assert_eq!(scheme.pending_digits.as_ptr(), pointer);
+        assert_eq!(scheme.pending_digits, b"29");
+        assert_eq!(scheme.reading(), "29");
+    }
+
+    #[test]
+    fn nine_key_index_failure_restores_pending_digits() {
+        let (dir, mut scheme) = nine_key_scheme();
+        scheme.pending_digits.extend_from_slice(b"2");
+        let pointer = scheme.pending_digits.as_ptr();
+        Connection::open(dir.path().join("msime-zhuyin.db"))
+            .unwrap()
+            .execute_batch("DROP TABLE syllables")
+            .unwrap();
+
+        assert!(scheme.handle_key(ZhuyinKey::Char(b'8')).is_err());
+
+        assert_eq!(scheme.pending_digits, b"2");
+        assert_eq!(scheme.pending_digits.as_ptr(), pointer);
     }
 
     #[test]
