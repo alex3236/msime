@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-/// `romaji_converter.cpp:11-44`, verbatim.
+/// 以 `romaji_converter.cpp:11-44` 为底，补上微软和 Google 日文输入法都认、C++ 表里缺的拼法：促音 `xtu`/`ltu`，拗音 `zya`/`zyu`/`zyo`（じゃ行）和 `dya`/`dyu`/`dyo`（ぢゃ行）。缺 `xtu` 时它整段停在待定字母里，用户打不出っ。反查（[`hiragana_to_romaji`]）先取最长拼法、再按字母序，っ 仍是 `xtsu`，じゃ 仍是 `jya`。
 const ROMAJI_TABLE: &[(&str, &str)] = &[
     ("a", "あ"),
     ("i", "い"),
@@ -102,6 +102,9 @@ const ROMAJI_TABLE: &[(&str, &str)] = &[
     ("jya", "じゃ"),
     ("jyu", "じゅ"),
     ("jyo", "じょ"),
+    ("zya", "じゃ"),
+    ("zyu", "じゅ"),
+    ("zyo", "じょ"),
     ("cha", "ちゃ"),
     ("chu", "ちゅ"),
     ("cho", "ちょ"),
@@ -111,6 +114,9 @@ const ROMAJI_TABLE: &[(&str, &str)] = &[
     ("tya", "ちゃ"),
     ("tyu", "ちゅ"),
     ("tyo", "ちょ"),
+    ("dya", "ぢゃ"),
+    ("dyu", "ぢゅ"),
+    ("dyo", "ぢょ"),
     ("nya", "にゃ"),
     ("nyu", "にゅ"),
     ("nyo", "にょ"),
@@ -171,6 +177,8 @@ const ROMAJI_TABLE: &[(&str, &str)] = &[
     ("lyo", "ょ"),
     ("xtsu", "っ"),
     ("ltsu", "っ"),
+    ("xtu", "っ"),
+    ("ltu", "っ"),
     ("xwa", "ゎ"),
     ("-", "ー"),
 ];
@@ -483,6 +491,21 @@ mod tests {
         assert!(matches!(hiragana_input("かな"), Cow::Borrowed("かな")));
         assert_eq!(hiragana_input("カナ").as_ref(), "かな");
         assert_eq!(hiragana_input("かナ").as_ref(), "かな");
+    }
+
+    /// 用户反馈的两种拼法（`xtu` 打不出っ、`tyou` 打不出ちょう）和同一批补上的拗音；反查仍取原来的拼法。
+    #[test]
+    fn microsoft_and_google_spellings() {
+        require_conversion("xtu", "っ", "", true);
+        require_conversion("ltu", "っ", "", true);
+        require_conversion("taxtuta", "たった", "", true);
+        require_conversion("tyou", "ちょう", "", true);
+        require_conversion("zyouzu", "じょうず", "", true);
+        require_conversion("dyo", "ぢょ", "", true);
+        assert!(is_single_kana_conversion(&convert_romaji("xtu")));
+        assert_eq!(hiragana_to_romaji("っ"), "xtsu");
+        assert_eq!(hiragana_to_romaji("じゃ"), "jya");
+        assert_eq!(hiragana_to_romaji("じょうず"), "jyouzu");
     }
 
     #[test]
